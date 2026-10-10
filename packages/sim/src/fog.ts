@@ -1,6 +1,6 @@
 import type { Cell, Ev, PlayerId, State, Unit, UnitId } from "./types.ts";
 
-/** Маска клеток, которые видит игрок (ромб манхэттенского радиуса вокруг каждого его юнита). */
+/** Маска клеток, которые видит игрок (круг евклидова радиуса вокруг каждого его юнита). */
 export function fillVision(w: number, h: number, units: Iterable<Unit>, player: PlayerId, out: Uint8Array): void {
   out.fill(0);
   for (const u of units) {
@@ -9,7 +9,7 @@ export function fillVision(w: number, h: number, units: Iterable<Unit>, player: 
     for (let dy = -r; dy <= r; dy++) {
       const y = u.y + dy;
       if (y < 0 || y >= h) continue;
-      const span = r - Math.abs(dy);
+      const span = Math.floor(Math.sqrt(r * r - dy * dy));
       const x0 = Math.max(0, u.x - span);
       const x1 = Math.min(w - 1, u.x + span);
       out.fill(1, y * w + x0, y * w + x1 + 1);

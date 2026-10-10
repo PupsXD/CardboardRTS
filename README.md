@@ -15,6 +15,7 @@
 | [Узкие места дизайна](docs/analysis/01-design-bottlenecks.md) | что в ГДД ломается и что с этим делать |
 | [Массовый мультиплеер](docs/analysis/02-mass-multiplayer.md) | что масштабируется, что нет, какие режимы |
 | [Результаты спайка](docs/analysis/03-spike-results.md) | что проверено тестами и бенчмарком, что нет |
+| [Сетка и бумажный стиль](docs/analysis/04-grid-and-paper-style.md) | скрытая клеточная сетка, нет стеков, референс Lines of Battle |
 | [ADR 0001: стек](docs/adr/0001-tech-stack.md) | TypeScript, Phaser 4, Node, SQLite и почему |
 | [ADR 0002: сервер и хранение](docs/adr/0002-server-authority-and-persistence.md) | авторитетный сервер, снимки, версии правил |
 | [Вопросы владельцу](docs/OWNER-QUESTIONS.md) | решения, которые за вами |
@@ -26,7 +27,7 @@
 
 ```bash
 npm install
-npm test          # 30 тестов ядра
+npm test          # 36 тестов ядра
 npm run typecheck # tsc --noEmit
 npm run bench     # замер 4 / 16 / 32 / 64 игроков
 ```

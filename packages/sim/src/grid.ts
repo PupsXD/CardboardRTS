@@ -1,8 +1,17 @@
 import type { Cell, State, Unit } from "./types.ts";
 import { Terrain } from "./types.ts";
 
-/** Очки движения за вход в клетку. Дорога вдвое дешевле равнины — это и есть «дороги увеличивают эффективность Движения». */
-const STEP_COST: Record<number, number> = {
+/**
+ * Метрика движения: 8 направлений, диагональ дороже в √2 (7/5 = 1.4, ошибка 1%).
+ * Очки движения юнита (`Unit.move`) умножаются на COST_SCALE, чтобы всё считалось целыми.
+ * Проверено расчётом: разброс «путь по сетке / прямая» 8.2% против 41% у 4 соседей и 15.5% у гекса.
+ */
+export const COST_SCALE = 5;
+const ORTHO = 5;
+const DIAG = 7;
+
+/** Очки движения за вход в клетку (до умножения на ORTHO/DIAG). Дорога вдвое дешевле равнины. */
+const TERRAIN_COST: Record<number, number> = {
   [Terrain.Plain]: 2,
   [Terrain.Road]: 1,
   [Terrain.Rough]: 3,
@@ -13,23 +22,41 @@ export const cellIndex = (s: Pick<State, "w">, x: number, y: number): number => 
 export const inBounds = (s: Pick<State, "w" | "h">, x: number, y: number): boolean =>
   x >= 0 && y >= 0 && x < s.w && y < s.h;
 
-/** Цена входа в клетку или null, если клетка непроходима / за картой. */
-export function stepCost(s: State, x: number, y: number): number | null {
+/** Цена входа в клетку (в единицах рельефа) или null, если клетка непроходима / за картой. */
+export function terrainCost(s: State, x: number, y: number): number | null {
   if (!inBounds(s, x, y)) return null;
-  return STEP_COST[s.terrain[cellIndex(s, x, y)]!] ?? null;
+  return TERRAIN_COST[s.terrain[cellIndex(s, x, y)]!] ?? null;
 }
 
-export const manhattan = (ax: number, ay: number, bx: number, by: number): number =>
-  Math.abs(ax - bx) + Math.abs(ay - by);
+const isWall = (s: State, x: number, y: number): boolean =>
+  inBounds(s, x, y) && s.terrain[cellIndex(s, x, y)] === Terrain.Blocked;
 
-/** Полная цена маршрута или null, если он разрывный / идёт через стену / за картой. */
+/** Квадрат евклидова расстояния: радиусы атаки и обзора — круги, а не ромбы. */
+export const dist2 = (ax: number, ay: number, bx: number, by: number): number =>
+  (ax - bx) * (ax - bx) + (ay - by) * (ay - by);
+
+/** Цена шага из (px,py) в соседнюю клетку (x,y) в масштабированных единицах или null, если шаг невозможен.
+ *  Диагональ запрещена, если любая из двух боковых клеток — стена (нельзя срезать угол). */
+export function stepCost(s: State, px: number, py: number, x: number, y: number): number | null {
+  const dx = x - px;
+  const dy = y - py;
+  if ((dx === 0 && dy === 0) || Math.abs(dx) > 1 || Math.abs(dy) > 1) return null;
+  const base = terrainCost(s, x, y);
+  if (base === null) return null;
+  if (dx !== 0 && dy !== 0) {
+    if (isWall(s, px + dx, py) || isWall(s, px, py + dy)) return null;
+    return base * DIAG;
+  }
+  return base * ORTHO;
+}
+
+/** Полная цена маршрута (в масштабированных единицах) или null, если он разрывный / через стену / за картой. */
 export function pathCost(s: State, from: Cell, path: readonly Cell[]): number | null {
   let px = from[0];
   let py = from[1];
   let total = 0;
   for (const [x, y] of path) {
-    if (manhattan(px, py, x, y) !== 1) return null;
-    const c = stepCost(s, x, y);
+    const c = stepCost(s, px, py, x, y);
     if (c === null) return null;
     total += c;
     px = x;
@@ -38,16 +65,23 @@ export function pathCost(s: State, from: Cell, path: readonly Cell[]): number | 
   return total;
 }
 
+/** Бюджет движения юнита в масштабированных единицах. */
+export const moveBudget = (u: Pick<Unit, "move">): number => u.move * COST_SCALE;
+
 const NEIGHBORS: readonly (readonly [number, number])[] = [
   [0, -1],
+  [1, -1],
   [1, 0],
+  [1, 1],
   [0, 1],
+  [-1, 1],
   [-1, 0],
+  [-1, -1],
 ];
 
 /**
- * Дейкстра по корзинам (цены — малые целые). Порядок обхода соседей фиксирован,
- * поэтому при равной цене всегда выбирается один и тот же маршрут.
+ * Дейкстра по корзинам (цены — малые целые). Порядок соседей фиксирован, поэтому при равной цене
+ * всегда выбирается один и тот же маршрут. `budget` — в масштабированных единицах (см. moveBudget).
  * `blocked` — клетки, которые планировщик считает занятыми (известные юниты).
  */
 export function reachable(
@@ -72,7 +106,7 @@ export function reachable(
       for (const [dx, dy] of NEIGHBORS) {
         const nx = cx + dx;
         const ny = cy + dy;
-        const sc = stepCost(s, nx, ny);
+        const sc = stepCost(s, cx, cy, nx, ny);
         if (sc === null) continue;
         const ni = cellIndex(s, nx, ny);
         if (blocked?.(ni)) continue;

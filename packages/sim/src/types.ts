@@ -18,11 +18,11 @@ export interface Unit {
   dmg: number;
   /** Сколько урона гасит стойка «Оборона». */
   defense: number;
-  /** Запас хода в очках движения (не в клетках: цену клетки задаёт рельеф). */
+  /** Запас хода в очках движения (не в клетках: цену клетки задаёт рельеф; масштаб — COST_SCALE в grid.ts). */
   move: number;
-  /** Радиус атаки, манхэттенский. */
+  /** Радиус атаки в клетках, евклидов (круг). */
   range: number;
-  /** Радиус обзора, манхэттенский. */
+  /** Радиус обзора в клетках, евклидов (круг). */
   vision: number;
 }
 
@@ -68,7 +68,7 @@ export interface Reject {
   reason: RejectReason;
 }
 
-export type BlockReason = "occupied" | "contested" | "swap" | "cycle";
+export type BlockReason = "occupied" | "contested" | "swap" | "cross" | "cycle";
 
 /** Лог разрешения хода. Это и есть то, что уходит клиентам (после фильтра тумана), а не состояние. */
 export type Ev =

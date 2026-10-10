@@ -1,4 +1,4 @@
-import { cellIndex, inBounds, manhattan, pathCost } from "./grid.ts";
+import { cellIndex, dist2, inBounds, moveBudget, pathCost } from "./grid.ts";
 import type {
   BlockReason,
   Cell,
@@ -88,7 +88,7 @@ export function resolveTurn(state: State, allOrders: PlayerOrders[], opts: Resol
         continue;
       }
       if (o.kind === "move") {
-        if (o.path.length === 0 || (pathCost(state, [u.x, u.y], o.path) ?? Infinity) > u.move) {
+        if (o.path.length === 0 || (pathCost(state, [u.x, u.y], o.path) ?? Infinity) > moveBudget(u)) {
           fail("bad-path");
           continue;
         }
@@ -99,8 +99,8 @@ export function resolveTurn(state: State, allOrders: PlayerOrders[], opts: Resol
           fail("bad-target");
           continue;
         }
-        const d = manhattan(u.x, u.y, ax, ay);
-        if (d < 1 || d > u.range) {
+        const d = dist2(u.x, u.y, ax, ay);
+        if (d < 1 || d > u.range * u.range) {
           fail("out-of-range");
           continue;
         }
@@ -210,6 +210,20 @@ export function resolveTurn(state: State, allOrders: PlayerOrders[], opts: Resol
             if (!om) reason = "occupied";
             else if (target(om)[0] === m.u.x && target(om)[1] === m.u.y) reason = "swap";
             else if (inCycle(m)) reason = "cycle";
+          }
+          if (!reason) {
+            // Диагональное пересечение «крестом»: два юнита идут по диагоналям одного квадрата 2×2 и
+            // проходят друг через друга в центре. Как и обмен местами, запрещено для обоих.
+            const dx = tx - m.u.x;
+            const dy = ty - m.u.y;
+            if (dx !== 0 && dy !== 0) {
+              const a = occ.get(cellIndex(state, m.u.x + dx, m.u.y));
+              const b = occ.get(cellIndex(state, m.u.x, m.u.y + dy));
+              const am = a && byUnit.get(a.id);
+              const bm = b && byUnit.get(b.id);
+              if (am && target(am)[0] === m.u.x && target(am)[1] === m.u.y + dy) reason = "cross";
+              else if (bm && target(bm)[0] === m.u.x + dx && target(bm)[1] === m.u.y) reason = "cross";
+            }
           }
           if (!reason) {
             const list = claims.get(ti)!;

@@ -4,7 +4,7 @@
 //
 // Запуск: npm run bench   (Node >= 24, TypeScript исполняется без сборки)
 import os from "node:os";
-import { filterEventsFor, reachable, resolveTurn, Terrain, visibleUnits } from "../src/index.ts";
+import { filterEventsFor, moveBudget, reachable, resolveTurn, Terrain, visibleUnits } from "../src/index.ts";
 import type { Order, PlayerOrders, State, Unit } from "../src/index.ts";
 
 function rng(seed: number): () => number {
@@ -93,8 +93,8 @@ function botOrders(s: State): PlayerOrders[] {
     if ((budget.get(u.owner) ?? 0) >= AP) continue;
     let order: Order | undefined;
     search: for (let dy = -u.range; dy <= u.range; dy++) {
-      for (let dx = -(u.range - Math.abs(dy)); dx <= u.range - Math.abs(dy); dx++) {
-        if (dx === 0 && dy === 0) continue;
+      for (let dx = -u.range; dx <= u.range; dx++) {
+        if ((dx === 0 && dy === 0) || dx * dx + dy * dy > u.range * u.range) continue;
         const t = occ.get((u.y + dy) * s.w + (u.x + dx));
         if (t && t.owner !== u.owner) {
           order = { kind: "attack", unit: u.id, at: [t.x, t.y] };
@@ -105,7 +105,7 @@ function botOrders(s: State): PlayerOrders[] {
     if (!order) {
       const g = goal.get(u.owner);
       if (!g) continue;
-      const { cost, prev } = reachable(s, [u.x, u.y], u.move, (i) => occ.has(i));
+      const { cost, prev } = reachable(s, [u.x, u.y], moveBudget(u), (i) => occ.has(i));
       let bestCell = -1;
       let bestD = Math.abs(u.x - g.x) + Math.abs(u.y - g.y);
       for (const i of cost.keys()) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyEvents, pathCost, reachable, resolveTurn, Terrain } from "../src/index.ts";
+import { applyEvents, COST_SCALE, moveBudget, pathCost, reachable, resolveTurn, Terrain } from "../src/index.ts";
 import type { Ev, PlayerOrders, State } from "../src/index.ts";
 import { attack, defend, line, move, orders, rng, shuffled, unit, world } from "./helpers.ts";
 
@@ -8,28 +8,56 @@ const at = (s: State, id: number) => {
   return u ? [u.x, u.y] : null;
 };
 
-describe("рельеф и маршруты", () => {
+describe("рельеф и маршруты (8 направлений)", () => {
   it("дорога вдвое дешевле равнины: тот же запас хода — вдвое дальше", () => {
     const s = world(20, 1, [unit(1, 0, 0, 0, { move: 6 })]);
-    expect(pathCost(s, [0, 0], line([0, 0], [3, 0]))).toBe(6); // 3 клетки равнины
-    expect(pathCost(s, [0, 0], line([0, 0], [4, 0]))).toBe(8);
+    expect(pathCost(s, [0, 0], line([0, 0], [3, 0]))).toBe(6 * COST_SCALE); // 3 клетки равнины
+    expect(pathCost(s, [0, 0], line([0, 0], [4, 0]))).toBe(8 * COST_SCALE);
     s.terrain.fill(Terrain.Road);
-    expect(pathCost(s, [0, 0], line([0, 0], [6, 0]))).toBe(6); // 6 клеток дороги
+    expect(pathCost(s, [0, 0], line([0, 0], [6, 0]))).toBe(6 * COST_SCALE); // 6 клеток дороги
   });
 
-  it("недопустимые маршруты: диагональ, стена, разрыв, за картой", () => {
+  it("диагональ стоит ×1.4 (7/5), а не ×2 как у 4 соседей", () => {
     const s = world(5, 5, [unit(1, 0, 0, 0)]);
-    s.terrain[1] = Terrain.Blocked;
+    expect(pathCost(s, [0, 0], [[1, 1]])).toBe(2 * 7); // равнина 2 × диагональ 7
+    expect(pathCost(s, [0, 0], [[1, 0]])).toBe(2 * 5);
+    // 3 клетки по диагонали ≈ 4.2 клетки по прямой
+    expect(pathCost(s, [0, 0], [[1, 1], [2, 2], [3, 3]])).toBe(42);
+  });
+
+  it("недопустимые шаги: прыжок, стена, срезание угла стены, за картой", () => {
+    const s = world(5, 5, [unit(1, 0, 0, 0)]);
+    s.terrain[1] = Terrain.Blocked; // (1,0)
     expect(pathCost(s, [0, 0], [[1, 0]])).toBeNull(); // стена
-    expect(pathCost(s, [0, 0], [[1, 1]])).toBeNull(); // диагональ
+    expect(pathCost(s, [0, 0], [[1, 1]])).toBeNull(); // диагональ мимо угла стены (1,0) запрещена
     expect(pathCost(s, [0, 0], [[0, 1], [0, 3]])).toBeNull(); // разрыв
     expect(pathCost(s, [0, 0], [[-1, 0]])).toBeNull(); // за картой
+    expect(pathCost(s, [0, 0], [[0, 1], [1, 2]])).not.toBeNull(); // а здесь угла стены нет
   });
 
   it("reachable уважает бюджет и стены", () => {
     const s = world(10, 1, [unit(1, 0, 0, 0)]);
-    const { cost } = reachable(s, [0, 0], 6);
+    const { cost } = reachable(s, [0, 0], 6 * COST_SCALE);
     expect([...cost.keys()].sort((a, b) => a - b)).toEqual([0, 1, 2, 3]);
+  });
+
+  it("зона досягаемости близка к кругу: разброс радиуса по направлениям ≤ 10%", () => {
+    const s = world(41, 41, [unit(1, 0, 20, 20)]);
+    const { cost } = reachable(s, [20, 20], 100); // 10 клеток равнины по прямой (по 10 за клетку)
+    let min = Infinity;
+    let max = 0;
+    for (const i of cost.keys()) {
+      const x = (i % 41) - 20;
+      const y = Math.floor(i / 41) - 20;
+      const d = Math.hypot(x, y);
+      if (d < 4) continue;
+      const c = cost.get(i)!;
+      // цена за единицу евклидова расстояния: у круга одинакова по всем направлениям
+      const k = c / d;
+      min = Math.min(min, k);
+      max = Math.max(max, k);
+    }
+    expect(max / min - 1).toBeLessThan(0.1);
   });
 });
 
@@ -146,6 +174,32 @@ describe("коллизии движения", () => {
     expect(again.state.units).toEqual(r.state.units);
   });
 
+  it("радиус атаки — круг: (2,2) при range 3 допустимо (8 ≤ 9), (3,1) нет (10 > 9)", () => {
+    const s = world(8, 8, [unit(1, 0, 0, 0, { range: 3 }), unit(2, 1, 2, 2), unit(3, 1, 3, 1)]);
+    const ok = resolveTurn(s, [orders(0, attack(1, [2, 2]))]);
+    expect(ok.rejected).toHaveLength(0);
+    const far = resolveTurn(s, [orders(0, attack(1, [3, 1]))]);
+    expect(far.rejected.map((r) => r.reason)).toEqual(["out-of-range"]);
+  });
+
+  it("диагональное пересечение «крестом» запрещено для обоих", () => {
+    const s = world(2, 2, [unit(1, 0, 0, 0), unit(2, 1, 1, 0)]);
+    const r = resolveTurn(s, [orders(0, move(1, [[1, 1]])), orders(1, move(2, [[0, 1]]))]);
+    expect(at(r.state, 1)).toEqual([0, 0]);
+    expect(at(r.state, 2)).toEqual([1, 0]);
+    expect(r.events.filter((e) => e.t === "blocked").map((e) => (e as { reason: string }).reason)).toEqual([
+      "cross",
+      "cross",
+    ]);
+  });
+
+  it("две параллельные диагонали не мешают друг другу", () => {
+    const s = world(4, 4, [unit(1, 0, 0, 0), unit(2, 1, 0, 1)]);
+    const r = resolveTurn(s, [orders(0, move(1, [[1, 1]])), orders(1, move(2, [[1, 2]]))]);
+    expect(at(r.state, 1)).toEqual([1, 1]);
+    expect(at(r.state, 2)).toEqual([1, 2]);
+  });
+
   it("обмен местами запрещён: оба остаются", () => {
     const s = world(3, 1, [unit(1, 0, 0, 0), unit(2, 1, 1, 0)]);
     const r = resolveTurn(s, [orders(0, move(1, [[1, 0]])), orders(1, move(2, [[0, 0]]))]);
@@ -213,7 +267,7 @@ describe("свойства", () => {
     for (const u of units) {
       const roll = r();
       if (roll < 0.55) {
-        const { cost, prev } = reachable(s, [u.x, u.y], u.move);
+        const { cost, prev } = reachable(s, [u.x, u.y], moveBudget(u));
         const reach = [...cost.keys()].filter((k) => k !== u.y * W + u.x);
         if (reach.length === 0) continue;
         const dest = reach[Math.floor(r() * reach.length)]!;
@@ -229,7 +283,7 @@ describe("свойства", () => {
         const dy = Math.floor(r() * 7) - 3;
         const tx = u.x + dx;
         const ty = u.y + dy;
-        if (Math.abs(dx) + Math.abs(dy) >= 1 && Math.abs(dx) + Math.abs(dy) <= 3 && tx >= 0 && ty >= 0 && tx < W && ty < H)
+        if (dx * dx + dy * dy >= 1 && dx * dx + dy * dy <= 9 && tx >= 0 && ty >= 0 && tx < W && ty < H)
           perPlayer[u.owner]!.orders.push(attack(u.id, [tx, ty]));
       } else if (roll < 0.9) {
         perPlayer[u.owner]!.orders.push(defend(u.id));
@@ -272,6 +326,26 @@ describe("свойства", () => {
       const seen = new Set(res.state.units.map((u) => u.y * s.w + u.x));
       expect(seen.size, `seed ${seed}`).toBe(res.state.units.length);
     }
+  });
+
+  it("в одном подтике у двух шагов нет общей середины: нет ни обмена местами, ни креста (300 ходов)", () => {
+    let crossesSeen = 0;
+    for (let seed = 1; seed <= 300; seed++) {
+      const { s, perPlayer } = randomScenario(seed);
+      for (const conflict of ["bounce", "seeded"] as const) {
+        const res = resolveTurn(s, perPlayer, { conflict });
+        const mids = new Map<string, number>();
+        for (const e of res.events) {
+          if (e.t === "blocked" && e.reason === "cross") crossesSeen++;
+          if (e.t !== "step" || !e.from || !e.to) continue;
+          const key = `${e.tick}:${e.from[0] + e.to[0]},${e.from[1] + e.to[1]}`;
+          expect(mids.has(key), `seed ${seed} ${conflict}: шаги ${mids.get(key)} и ${e.unit} делят середину ${key}`).toBe(false);
+          mids.set(key, e.unit);
+        }
+      }
+    }
+    // страховка от «зелёного по пустоте»: правило креста должно реально срабатывать на этих сценариях
+    expect(crossesSeen).toBeGreaterThan(0);
   });
 
   it("повторный запуск даёт байт-в-байт тот же результат", () => {
