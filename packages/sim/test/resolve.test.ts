@@ -1,358 +1,308 @@
 import { describe, expect, it } from "vitest";
-import { applyEvents, COST_SCALE, moveBudget, pathCost, reachable, resolveTurn, Terrain } from "../src/index.ts";
-import type { Ev, PlayerOrders, State } from "../src/index.ts";
-import { attack, defend, line, move, orders, rng, shuffled, unit, world } from "./helpers.ts";
+import { applyEvents, previewMove, resolveTurn, SCALE, Terrain, TERRAIN_CELL } from "../src/index.ts";
+import type { AttackTiming, PlayerOrders, State } from "../src/index.ts";
+import { attack, defend, move, orders, posOf, pt, rng, shuffled, unit, world } from "./helpers.ts";
 
-const at = (s: State, id: number) => {
-  const u = s.units.find((x) => x.id === id);
-  return u ? [u.x, u.y] : null;
-};
-
-describe("рельеф и маршруты (8 направлений)", () => {
-  it("дорога вдвое дешевле равнины: тот же запас хода — вдвое дальше", () => {
-    const s = world(20, 1, [unit(1, 0, 0, 0, { move: 6 })]);
-    expect(pathCost(s, [0, 0], line([0, 0], [3, 0]))).toBe(6 * COST_SCALE); // 3 клетки равнины
-    expect(pathCost(s, [0, 0], line([0, 0], [4, 0]))).toBe(8 * COST_SCALE);
-    s.terrain.fill(Terrain.Road);
-    expect(pathCost(s, [0, 0], line([0, 0], [6, 0]))).toBe(6 * COST_SCALE); // 6 клеток дороги
+describe("движение: скорость, рельеф, маршрут", () => {
+  it("за ход юнит проходит speed × тики пунктов по равнине", () => {
+    const s = world(40, 40, [unit(1, 0, 10, 10)]);
+    const r = resolveTurn(s, [orders(0, move([1], pt(20, 10)))]);
+    expect(posOf(r.state, 1)).toEqual([1300, 1000]);
   });
 
-  it("диагональ стоит ×1.4 (7/5), а не ×2 как у 4 соседей", () => {
-    const s = world(5, 5, [unit(1, 0, 0, 0)]);
-    expect(pathCost(s, [0, 0], [[1, 1]])).toBe(2 * 7); // равнина 2 × диагональ 7
-    expect(pathCost(s, [0, 0], [[1, 0]])).toBe(2 * 5);
-    // 3 клетки по диагонали ≈ 4.2 клетки по прямой
-    expect(pathCost(s, [0, 0], [[1, 1], [2, 2], [3, 3]])).toBe(42);
+  it("дорога вдвое быстрее, бездорожье медленнее (60%)", () => {
+    const road = world(40, 40, [unit(1, 0, 10, 10)]);
+    road.terrain.fill(Terrain.Road);
+    expect(posOf(resolveTurn(road, [orders(0, move([1], pt(30, 10)))]).state, 1)).toEqual([1600, 1000]);
+    const rough = world(40, 40, [unit(1, 0, 10, 10)]);
+    rough.terrain.fill(Terrain.Rough);
+    // 30 × 60% = 18 пунктов за тик, 10 тиков
+    expect(posOf(resolveTurn(rough, [orders(0, move([1], pt(30, 10)))]).state, 1)).toEqual([1180, 1000]);
   });
 
-  it("недопустимые шаги: прыжок, стена, срезание угла стены, за картой", () => {
-    const s = world(5, 5, [unit(1, 0, 0, 0)]);
-    s.terrain[1] = Terrain.Blocked; // (1,0)
-    expect(pathCost(s, [0, 0], [[1, 0]])).toBeNull(); // стена
-    expect(pathCost(s, [0, 0], [[1, 1]])).toBeNull(); // диагональ мимо угла стены (1,0) запрещена
-    expect(pathCost(s, [0, 0], [[0, 1], [0, 3]])).toBeNull(); // разрыв
-    expect(pathCost(s, [0, 0], [[-1, 0]])).toBeNull(); // за картой
-    expect(pathCost(s, [0, 0], [[0, 1], [1, 2]])).not.toBeNull(); // а здесь угла стены нет
+  it("ломаная: излом проходится без потери скорости; недоход останавливает ровно на бюджете", () => {
+    const s = world(40, 40, [unit(1, 0, 10, 10)]);
+    const r = resolveTurn(s, [orders(0, move([1], pt(11, 10), pt(11, 12)))]); // 100 + 200 = 300 = бюджет
+    expect(posOf(r.state, 1)).toEqual([1100, 1200]);
+    const far = resolveTurn(s, [orders(0, move([1], pt(11, 10), pt(11, 30)))]);
+    expect(posOf(far.state, 1)).toEqual([1100, 1200]); // дальше хода не прошёл
   });
 
-  it("reachable уважает бюджет и стены", () => {
-    const s = world(10, 1, [unit(1, 0, 0, 0)]);
-    const { cost } = reachable(s, [0, 0], 6 * COST_SCALE);
-    expect([...cost.keys()].sort((a, b) => a - b)).toEqual([0, 1, 2, 3]);
+  it("превью маршрута совпадает с исполнением для одинокого юнита", () => {
+    const s = world(40, 40, [unit(1, 0, 10, 10)]);
+    s.terrain.fill(Terrain.Plain);
+    const path = [pt(14, 10), pt(14, 14)];
+    const trace = previewMove(s, s.units, path)[0]!;
+    const r = resolveTurn(s, [orders(0, move([1], ...path))]);
+    expect(trace[trace.length - 1]).toEqual(posOf(r.state, 1));
+    expect(trace).toHaveLength(11); // начальная точка + 10 тиков
   });
 
-  it("зона досягаемости близка к кругу: разброс радиуса по направлениям ≤ 10%", () => {
-    const s = world(41, 41, [unit(1, 0, 20, 20)]);
-    const { cost } = reachable(s, [20, 20], 100); // 10 клеток равнины по прямой (по 10 за клетку)
-    let min = Infinity;
-    let max = 0;
-    for (const i of cost.keys()) {
-      const x = (i % 41) - 20;
-      const y = Math.floor(i / 41) - 20;
-      const d = Math.hypot(x, y);
-      if (d < 4) continue;
-      const c = cost.get(i)!;
-      // цена за единицу евклидова расстояния: у круга одинакова по всем направлениям
-      const k = c / d;
-      min = Math.min(min, k);
-      max = Math.max(max, k);
-    }
-    expect(max / min - 1).toBeLessThan(0.1);
+  it("стена — твёрдое тело: юнит упирается в неё вплотную (радиус 50), сквозь не проходит", () => {
+    const s = world(40, 40, [unit(1, 0, 10, 10)]);
+    for (let y = 0; y < s.th; y++) s.terrain[y * s.tw + 6] = Terrain.Blocked; // x ∈ [1200, 1400)
+    const r = resolveTurn(s, [orders(0, move([1], pt(30, 10)))]);
+    expect(posOf(r.state, 1)).toEqual([1150, 1000]);
+  });
+
+  it("центр оказался в непроходимой клетке из-за собственного шага: остановка и событие blocked", () => {
+    // скорость 400 за тик перепрыгивает зону выталкивания; центр попадает в стену — юнит останавливается
+    const s = world(40, 40, [unit(1, 0, 10, 10, { speed: 150, radius: 10 })]);
+    for (let y = 0; y < s.th; y++) s.terrain[y * s.tw + 6] = Terrain.Blocked; // x ∈ [1200, 1400)
+    const r = resolveTurn(s, [orders(0, move([1], pt(30, 10)))]);
+    const b = r.events.find((e) => e.t === "blocked");
+    expect(b).toMatchObject({ unit: 1, reason: "terrain" });
+    expect(posOf(r.state, 1)![0]).toBeLessThan(1200);
   });
 });
 
-describe("валидация приказов и AP", () => {
-  it("лишние приказы отклоняются по AP, оборона бесплатна, дубли и чужие юниты отклоняются", () => {
-    const s = world(10, 10, [unit(1, 0, 0, 0), unit(2, 0, 0, 2), unit(3, 0, 0, 4), unit(9, 1, 9, 9)]);
-    s.players[0]!.ap = 2;
-    const r = resolveTurn(s, [
-      orders(0, move(1, [[1, 0]]), move(2, [[1, 2]]), move(3, [[1, 4]]), defend(3)),
-      orders(1, move(1, [[8, 9]])), // юнит 1 принадлежит игроку 0
-    ]);
-    const reasons = r.rejected.map((x) => `${x.player}:${x.unit}:${x.reason}`);
-    expect(reasons).toContain("0:3:no-ap");
-    expect(reasons).toContain("1:1:not-owner");
-    expect(at(r.state, 1)).toEqual([1, 0]);
-    expect(at(r.state, 2)).toEqual([1, 2]);
-    // юнит 3: приказ движения не прошёл по AP, зато оборона бесплатна и принята
-    expect(at(r.state, 3)).toEqual([0, 4]);
+describe("валидация приказов, группы и AP", () => {
+  it("плохие маршруты: пустой, за картой, слишком много точек", () => {
+    const s = world(40, 40, [unit(1, 0, 10, 10)]);
+    const reasons = (path: ReturnType<typeof pt>[]) =>
+      resolveTurn(s, [orders(0, move([1], ...path))]).rejected.map((x) => x.reason);
+    expect(reasons([])).toEqual(["bad-path"]);
+    expect(reasons([pt(50, 10)])).toEqual(["bad-path"]);
+    expect(reasons(Array.from({ length: 17 }, (_, i) => pt(11 + (i % 3), 10)))).toEqual(["bad-path"]);
   });
 
-  it("второй приказ одному юниту — дубль; плохой маршрут и дальняя цель отклоняются", () => {
-    const s = world(10, 10, [unit(1, 0, 0, 0, { range: 2 })]);
-    const r = resolveTurn(s, [
-      orders(0, move(1, [[1, 0]]), attack(1, [2, 0]), move(1, [[0, 1]])),
+  it("группа из 5 стоит 1 AP; второй приказ при ap=1 отклоняется; оборона бесплатна", () => {
+    const us = Array.from({ length: 6 }, (_, i) => unit(i + 1, 0, 10 + i * 2, 10));
+    const s = world(60, 40, us);
+    s.players[0]!.ap = 1;
+    const r = resolveTurn(s, [orders(0, move([1, 2, 3, 4, 5], pt(15, 20)), move([6], pt(20, 20)), defend([6]))]);
+    expect(r.rejected.map((x) => x.reason)).toEqual(["no-ap"]);
+    expect(posOf(r.state, 6)).toEqual(pt(20, 10)); // приказ движения не прошёл, юнит стоит
+  });
+
+  it("группа больше maxGroup, чужие и дубли отклоняются целиком", () => {
+    const us = [...Array.from({ length: 8 }, (_, i) => unit(i + 1, 0, 5 + i * 2, 5)), unit(20, 1, 30, 30)];
+    const s = world(60, 60, us);
+    const run = (...o: PlayerOrders[]) => resolveTurn(s, o).rejected.map((x) => x.reason);
+    expect(run(orders(0, move([1, 2, 3, 4, 5, 6, 7], pt(10, 20))))).toEqual(["group-too-big"]);
+    expect(run(orders(0, move([1, 20], pt(10, 20))))).toEqual(["not-owner"]);
+    expect(run(orders(0, move([1, 1], pt(10, 20))))).toEqual(["duplicate"]);
+    expect(run(orders(0, move([1, 2], pt(10, 20)), attack([2], pt(8, 5))))).toEqual(["duplicate"]);
+    expect(run(orders(0, move([], pt(10, 20))))).toEqual(["empty-group"]);
+    expect(run(orders(0, move([99], pt(10, 20))))).toEqual(["unknown-unit"]);
+    expect(run(orders(0, attack([1], pt(30, 5))))).toEqual(["out-of-range"]);
+  });
+
+  it("группа сохраняет построение и идёт со скоростью самого медленного", () => {
+    const us = [unit(1, 0, 10, 10), unit(2, 0, 11.5, 10, { speed: 20 }), unit(3, 0, 10, 11.5), unit(4, 0, 11.5, 11.5)];
+    const s = world(60, 40, us);
+    const r = resolveTurn(s, [orders(0, move([1, 2, 3, 4], pt(25, 11)))]);
+    // все прошли по 200 (20 × 10 тиков), построение сохранено в точности
+    expect(r.state.units.map((u) => [u.x, u.y])).toEqual([
+      [1200, 1000],
+      [1350, 1000],
+      [1200, 1150],
+      [1350, 1150],
     ]);
-    expect(r.rejected.map((x) => x.reason)).toEqual(["duplicate", "duplicate"]);
-    const r2 = resolveTurn(s, [orders(0, attack(1, [5, 0]))]);
-    expect(r2.rejected[0]!.reason).toBe("out-of-range");
-    const r3 = resolveTurn(s, [orders(0, move(1, line([0, 0], [5, 0])))]);
-    expect(r3.rejected[0]!.reason).toBe("bad-path"); // цена 10 > запас 8
   });
 });
 
-describe("порядок разрешения: attacks-first (ГДД v0.1) против move-first", () => {
-  const retreat = () => {
-    // A (игрок 0) бьёт по клетке, где стоит B; B в тот же ход отступает за радиус атаки.
-    const s = world(12, 1, [unit(1, 0, 0, 0, { range: 3 }), unit(2, 1, 3, 0)]);
-    return [s, [orders(0, attack(1, [3, 0])), orders(1, move(2, line([3, 0], [5, 0])))]] as const;
-  };
-
-  it("attacks-first: отступление НЕ спасает от выстрела этого хода", () => {
-    const [s, o] = retreat();
-    const r = resolveTurn(s, o as unknown as PlayerOrders[], { order: "attacks-first" });
-    expect(r.state.units.find((u) => u.id === 2)!.hp).toBe(6);
-    expect(at(r.state, 2)).toEqual([5, 0]);
+describe("тела расталкиваются, а не проходят друг сквозь друга", () => {
+  it("лоб в лоб строго по прямой: оба остановились вплотную, симметрично, никто не прошёл", () => {
+    const s = world(40, 40, [unit(1, 0, 10, 10), unit(2, 1, 14, 10)]);
+    const r = resolveTurn(s, [orders(0, move([1], pt(14, 10))), orders(1, move([2], pt(10, 10)))]);
+    const a = posOf(r.state, 1)!;
+    const b = posOf(r.state, 2)!;
+    expect(a[0] + b[0]).toBe(2400); // зеркально относительно середины
+    expect(a[0]).toBeLessThan(b[0]);
+    expect(b[0] - a[0]).toBeGreaterThanOrEqual(98); // вплотную: сумма радиусов 100
+    expect(a[1]).toBe(1000);
+    expect(r.stats.maxOverlap).toBeLessThanOrEqual(2);
   });
 
-  it("move-first: отступивший уходит от выстрела, выстрел по пустой клетке", () => {
-    const [s, o] = retreat();
-    const r = resolveTurn(s, o as unknown as PlayerOrders[], { order: "move-first" });
-    expect(r.state.units.find((u) => u.id === 2)!.hp).toBe(10);
-    expect(r.events.some((e) => e.t === "miss" && e.reason === "empty")).toBe(true);
+  it("движущийся упирается в стоящего, стоящий не сдвигается ни на пункт", () => {
+    const s = world(40, 40, [unit(1, 0, 10, 10), unit(2, 1, 12, 10)]);
+    const r = resolveTurn(s, [orders(0, move([1], pt(16, 10))), orders(1, defend([2]))]);
+    expect(posOf(r.state, 2)).toEqual(pt(12, 10));
+    expect(posOf(r.state, 1)![0]).toBeLessThanOrEqual(1100 + 2);
   });
 
-  it("стойка «Оборона» гасит урон ровно на defense (минимум 1)", () => {
-    const s = world(10, 1, [unit(1, 0, 0, 0), unit(2, 1, 2, 0)]);
-    const plain = resolveTurn(s, [orders(0, attack(1, [2, 0]))]);
-    const guarded = resolveTurn(s, [orders(0, attack(1, [2, 0])), orders(1, defend(2))]);
-    expect(plain.state.units.find((u) => u.id === 2)!.hp).toBe(6);
-    expect(guarded.state.units.find((u) => u.id === 2)!.hp).toBe(8);
+  it("со смещением в полрадиуса тела скользят друг мимо друга и не остаются внутри друг друга", () => {
+    const s = world(40, 40, [unit(1, 0, 10, 10), unit(2, 1, 14, 10.3)]);
+    const r = resolveTurn(s, [orders(0, move([1], pt(14, 10))), orders(1, move([2], pt(10, 10.3)))]);
+    expect(r.stats.maxOverlap).toBeLessThanOrEqual(10);
+  });
+});
+
+describe("атака: время залпа решает, можно ли уйти от выстрела", () => {
+  // A (игрок 0) бьёт по точке (12,10), где стоит B; B за ход уходит на юг на 3 единицы.
+  const setup = () =>
+    world(40, 40, [unit(1, 0, 10, 10, { aoe: 25 }), unit(2, 1, 12, 10)]);
+  const plan = [orders(0, attack([1], pt(12, 10))), orders(1, move([2], pt(12, 15)))];
+  const hpOf = (s: State, id: number) => s.units.find((u) => u.id === id)!.hp;
+
+  it("start: уйти нельзя, полный урон начала хода", () => {
+    const r = resolveTurn(setup(), plan, { attackTiming: "start" });
+    expect(hpOf(r.state, 2)).toBe(60);
   });
 
-  it("взаимное убийство: убитые успевают выстрелить", () => {
-    const s = world(10, 1, [unit(1, 0, 0, 0, { hp: 4 }), unit(2, 1, 2, 0, { hp: 4 })]);
-    const r = resolveTurn(s, [orders(0, attack(1, [2, 0])), orders(1, attack(2, [0, 0]))]);
+  it("end: ушедший не пострадал, выстрел «мимо»", () => {
+    const r = resolveTurn(setup(), plan, { attackTiming: "end" });
+    expect(hpOf(r.state, 2)).toBe(100);
+    expect(r.events.some((e) => e.t === "miss")).toBe(true);
+  });
+
+  it("zone: цель, прошедшая зону, получает часть урона (3 тика × 4 из 10)", () => {
+    const r = resolveTurn(setup(), plan, { attackTiming: "zone" });
+    expect(hpOf(r.state, 2)).toBe(88);
+  });
+
+  it("zone: оборона режет урон на тик (4 → 2), а стоящий в зоне весь ход получает 10 попаданий", () => {
+    const stay = world(40, 40, [unit(1, 0, 10, 10), unit(2, 1, 12, 10)]);
+    const open = resolveTurn(stay, [orders(0, attack([1], pt(12, 10)))], { attackTiming: "zone" });
+    const guarded = resolveTurn(stay, [orders(0, attack([1], pt(12, 10))), orders(1, defend([2]))], { attackTiming: "zone" });
+    expect(hpOf(open.state, 2)).toBe(60);
+    expect(hpOf(guarded.state, 2)).toBe(80);
+  });
+
+  it("start: взаимное убийство — убитые успевают выстрелить", () => {
+    const s = world(40, 40, [unit(1, 0, 10, 10, { hp: 30 }), unit(2, 1, 12, 10, { hp: 30 })]);
+    const r = resolveTurn(s, [orders(0, attack([1], pt(12, 10))), orders(1, attack([2], pt(10, 10)))], { attackTiming: "start" });
     expect(r.state.units).toHaveLength(0);
   });
 
-  it("убитый в фазе атак не двигается (attacks-first)", () => {
-    const s = world(10, 1, [unit(1, 0, 0, 0), unit(2, 1, 2, 0, { hp: 3 })]);
-    const r = resolveTurn(s, [orders(0, attack(1, [2, 0])), orders(1, move(2, line([2, 0], [5, 0])))]);
+  it("start: фокус тремя стрелками по юниту с 50 hp — 70 урона зря (overkill)", () => {
+    const s = world(40, 40, [
+      unit(1, 0, 10, 10),
+      unit(2, 0, 10, 12),
+      unit(3, 0, 10, 14),
+      unit(9, 1, 12, 12, { hp: 50, aoe: 0 }),
+    ]);
+    const r = resolveTurn(s, [orders(0, attack([1], pt(12, 12)), attack([2], pt(12, 12)), attack([3], pt(12, 12)))], {
+      attackTiming: "start",
+    });
+    expect(r.state.units.find((u) => u.id === 9)).toBeUndefined();
+    expect(r.stats.hits).toBe(3);
+    expect(r.stats.overkill).toBe(70);
+  });
+
+  it("убитый в зоне больше не двигается и не стреляет", () => {
+    const s = world(40, 40, [unit(1, 0, 10, 10, { dmg: 400 }), unit(2, 1, 12, 10, { hp: 30 })]);
+    const r = resolveTurn(s, [orders(0, attack([1], pt(12, 10))), orders(1, move([2], pt(12, 20)))], { attackTiming: "zone" });
     expect(r.state.units.map((u) => u.id)).toEqual([1]);
     expect(r.events.some((e) => e.t === "step")).toBe(false);
   });
-
-  it("фокус: выстрелы сверх нужного считаются как overkill", () => {
-    const s = world(10, 3, [
-      unit(1, 0, 0, 0),
-      unit(2, 0, 0, 1),
-      unit(3, 0, 0, 2),
-      unit(9, 1, 2, 1, { hp: 5 }),
-    ]);
-    const r = resolveTurn(s, [orders(0, attack(1, [2, 1]), attack(2, [2, 1]), attack(3, [2, 1]))]);
-    expect(r.state.units.find((u) => u.id === 9)).toBeUndefined();
-    expect(r.stats.hits).toBe(3);
-    expect(r.stats.overkill).toBe(7); // 12 урона на 5 hp
-  });
 });
 
-describe("коллизии движения", () => {
-  it("лоб в лоб в коридоре: оба останавливаются рядом с клеткой спора (bounce)", () => {
-    const s = world(7, 1, [unit(1, 0, 0, 0), unit(2, 1, 4, 0)]);
-    const r = resolveTurn(s, [orders(0, move(1, line([0, 0], [2, 0]))), orders(1, move(2, line([4, 0], [2, 0])))]);
-    expect(at(r.state, 1)).toEqual([1, 0]);
-    expect(at(r.state, 2)).toEqual([3, 0]);
-    expect(r.events.filter((e) => e.t === "blocked").map((e) => (e as { reason: string }).reason)).toEqual([
-      "contested",
-      "contested",
-    ]);
-  });
-
-  it("seeded: из трёх претендентов клетку получает ровно один, детерминированно", () => {
-    const mk = () =>
-      world(5, 3, [unit(1, 0, 0, 1), unit(2, 1, 4, 1), unit(3, 2, 2, 0)], { seed: 777 });
-    const o = [
-      orders(0, move(1, line([0, 1], [2, 1]))),
-      orders(1, move(2, line([4, 1], [2, 1]))),
-      orders(2, move(3, line([2, 0], [2, 1]))),
-    ];
-    const r = resolveTurn(mk(), o, { conflict: "seeded" });
-    const winners = r.state.units.filter((u) => u.x === 2 && u.y === 1);
-    expect(winners).toHaveLength(1);
-    const again = resolveTurn(mk(), o, { conflict: "seeded" });
-    expect(again.state.units).toEqual(r.state.units);
-  });
-
-  it("радиус атаки — круг: (2,2) при range 3 допустимо (8 ≤ 9), (3,1) нет (10 > 9)", () => {
-    const s = world(8, 8, [unit(1, 0, 0, 0, { range: 3 }), unit(2, 1, 2, 2), unit(3, 1, 3, 1)]);
-    const ok = resolveTurn(s, [orders(0, attack(1, [2, 2]))]);
-    expect(ok.rejected).toHaveLength(0);
-    const far = resolveTurn(s, [orders(0, attack(1, [3, 1]))]);
-    expect(far.rejected.map((r) => r.reason)).toEqual(["out-of-range"]);
-  });
-
-  it("диагональное пересечение «крестом» запрещено для обоих", () => {
-    const s = world(2, 2, [unit(1, 0, 0, 0), unit(2, 1, 1, 0)]);
-    const r = resolveTurn(s, [orders(0, move(1, [[1, 1]])), orders(1, move(2, [[0, 1]]))]);
-    expect(at(r.state, 1)).toEqual([0, 0]);
-    expect(at(r.state, 2)).toEqual([1, 0]);
-    expect(r.events.filter((e) => e.t === "blocked").map((e) => (e as { reason: string }).reason)).toEqual([
-      "cross",
-      "cross",
-    ]);
-  });
-
-  it("две параллельные диагонали не мешают друг другу", () => {
-    const s = world(4, 4, [unit(1, 0, 0, 0), unit(2, 1, 0, 1)]);
-    const r = resolveTurn(s, [orders(0, move(1, [[1, 1]])), orders(1, move(2, [[1, 2]]))]);
-    expect(at(r.state, 1)).toEqual([1, 1]);
-    expect(at(r.state, 2)).toEqual([1, 2]);
-  });
-
-  it("обмен местами запрещён: оба остаются", () => {
-    const s = world(3, 1, [unit(1, 0, 0, 0), unit(2, 1, 1, 0)]);
-    const r = resolveTurn(s, [orders(0, move(1, [[1, 0]])), orders(1, move(2, [[0, 0]]))]);
-    expect(at(r.state, 1)).toEqual([0, 0]);
-    expect(at(r.state, 2)).toEqual([1, 0]);
-    expect(r.events.every((e) => e.t !== "blocked" || e.reason === "swap")).toBe(true);
-  });
-
-  it("круг по часовой стрелке 2×2 блокируется целиком", () => {
-    const s = world(2, 2, [unit(1, 0, 0, 0), unit(2, 1, 1, 0), unit(3, 2, 1, 1), unit(4, 3, 0, 1)]);
-    const r = resolveTurn(s, [
-      orders(0, move(1, [[1, 0]])),
-      orders(1, move(2, [[1, 1]])),
-      orders(2, move(3, [[0, 1]])),
-      orders(3, move(4, [[0, 0]])),
-    ]);
-    expect(r.state.units.map((u) => [u.x, u.y])).toEqual([[0, 0], [1, 0], [1, 1], [0, 1]]);
-    expect(r.events.filter((e) => e.t === "blocked")).toHaveLength(4);
-  });
-
-  it("«поезд»: цепочка юнитов едет вместе, если голова свободна", () => {
-    const s = world(5, 1, [unit(1, 0, 0, 0), unit(2, 0, 1, 0)]);
-    const r = resolveTurn(s, [orders(0, move(1, [[1, 0]]), move(2, [[2, 0]]))]);
-    expect(at(r.state, 1)).toEqual([1, 0]);
-    expect(at(r.state, 2)).toEqual([2, 0]);
-  });
-
-  it("поезд с заблокированной головой: каскадная остановка", () => {
-    const s = world(5, 1, [unit(1, 0, 0, 0), unit(2, 0, 1, 0), unit(3, 1, 2, 0)]);
-    const r = resolveTurn(s, [orders(0, move(1, [[1, 0]]), move(2, [[2, 0]]))]);
-    expect(at(r.state, 1)).toEqual([0, 0]);
-    expect(at(r.state, 2)).toEqual([1, 0]);
-    const reasons = r.events.filter((e) => e.t === "blocked").map((e) => (e as { reason: string }).reason);
-    expect(reasons).toEqual(["occupied", "occupied"]);
-  });
-
-  it("юнит, вышедший из клетки, освобождает её для другого в тот же подтик", () => {
-    const s = world(4, 2, [unit(1, 0, 0, 0), unit(2, 1, 1, 0)]);
-    const r = resolveTurn(s, [orders(0, move(1, [[1, 0]])), orders(1, move(2, [[2, 0]]))]);
-    expect(at(r.state, 1)).toEqual([1, 0]);
-    expect(at(r.state, 2)).toEqual([2, 0]);
-  });
-});
-
-describe("свойства", () => {
-  const randomScenario = (seed: number) => {
+describe("свойства (случайные сценарии)", () => {
+  const MAP = 30;
+  const randomScenario = (seed: number, apLimit = 99) => {
     const r = rng(seed);
-    const W = 8;
-    const H = 8;
-    const cells = shuffled(
-      Array.from({ length: W * H }, (_, i) => [i % W, Math.floor(i / W)] as const),
-      r,
-    );
-    const units = Array.from({ length: 14 }, (_, i) =>
-      unit(i + 1, i % 3, cells[i]![0], cells[i]![1], { move: 6, range: 3, hp: 1 + Math.floor(r() * 10) }),
-    );
-    const s = world(W, H, units, { seed: Math.floor(r() * 1e9) });
+    const players = 3;
+    const us = [] as ReturnType<typeof unit>[];
+    let id = 1;
+    for (let p = 0; p < players; p++) {
+      let placed = 0;
+      let guard = 0;
+      while (placed < 8 && guard++ < 500) {
+        const x = 1 + r() * (MAP - 2);
+        const y = 1 + r() * (MAP - 2);
+        if (us.some((u) => (u.x - x * SCALE) ** 2 + (u.y - y * SCALE) ** 2 < 110 * 110)) continue;
+        us.push(
+          unit(id++, p, x, y, {
+            hp: 20 + Math.floor(r() * 130),
+            speed: 20 + Math.floor(r() * 21),
+            aoe: Math.floor(r() * 40),
+          }),
+        );
+        placed++;
+      }
+    }
+    const s = world(MAP, MAP, us, { maxGroup: 4 });
     for (let i = 0; i < s.terrain.length; i++) {
       const v = r();
-      s.terrain[i] = v < 0.1 ? Terrain.Blocked : v < 0.3 ? Terrain.Road : Terrain.Plain;
+      s.terrain[i] = v < 0.08 ? Terrain.Blocked : v < 0.28 ? Terrain.Road : v < 0.38 ? Terrain.Rough : Terrain.Plain;
     }
-    // юниты не стоят на стенах
-    for (const u of units) if (s.terrain[u.y * W + u.x] === Terrain.Blocked) s.terrain[u.y * W + u.x] = Terrain.Plain;
-    const perPlayer: PlayerOrders[] = [0, 1, 2].map((p) => ({ player: p, orders: [] }));
-    for (const u of units) {
-      const roll = r();
-      if (roll < 0.55) {
-        const { cost, prev } = reachable(s, [u.x, u.y], moveBudget(u));
-        const reach = [...cost.keys()].filter((k) => k !== u.y * W + u.x);
-        if (reach.length === 0) continue;
-        const dest = reach[Math.floor(r() * reach.length)]!;
-        const path: [number, number][] = [];
-        let cur = dest;
-        while (cur !== u.y * W + u.x) {
-          path.push([cur % W, Math.floor(cur / W)]);
-          cur = prev.get(cur)!;
+    for (const u of us) s.terrain[Math.floor(u.y / TERRAIN_CELL) * s.tw + Math.floor(u.x / TERRAIN_CELL)] = Terrain.Plain;
+    for (const p of s.players) p.ap = apLimit;
+
+    const perPlayer: PlayerOrders[] = [];
+    for (let p = 0; p < players; p++) {
+      const mine = shuffled(us.filter((u) => u.owner === p), r);
+      const list: PlayerOrders["orders"] = [];
+      while (mine.length) {
+        const g = mine.splice(0, 1 + Math.floor(r() * 3));
+        const ids = g.map((u) => u.id);
+        const roll = r();
+        if (roll < 0.55) {
+          const n = 1 + Math.floor(r() * 3);
+          const path = Array.from({ length: n }, () => pt(r() * MAP, r() * MAP));
+          list.push(move(ids, ...path));
+        } else if (roll < 0.8) {
+          const first = g[0]!;
+          const at: [number, number] = [first.x + Math.round((r() - 0.5) * 400), first.y + Math.round((r() - 0.5) * 400)];
+          list.push(attack(ids, at));
+        } else if (roll < 0.9) {
+          list.push(defend(ids));
         }
-        perPlayer[u.owner]!.orders.push(move(u.id, path.reverse()));
-      } else if (roll < 0.8) {
-        const dx = Math.floor(r() * 7) - 3;
-        const dy = Math.floor(r() * 7) - 3;
-        const tx = u.x + dx;
-        const ty = u.y + dy;
-        if (dx * dx + dy * dy >= 1 && dx * dx + dy * dy <= 9 && tx >= 0 && ty >= 0 && tx < W && ty < H)
-          perPlayer[u.owner]!.orders.push(attack(u.id, [tx, ty]));
-      } else if (roll < 0.9) {
-        perPlayer[u.owner]!.orders.push(defend(u.id));
       }
+      perPlayer.push({ player: p, orders: list });
     }
     return { s, perPlayer, r };
   };
 
-  const canon = (res: ReturnType<typeof resolveTurn>) => JSON.stringify({ s: res.state.units, e: res.events, x: res.stats });
+  const canon = (res: ReturnType<typeof resolveTurn>) =>
+    JSON.stringify({ u: res.state.units, e: res.events, x: res.stats, rj: [...res.rejected].map((q) => [q.player, q.reason, [...q.units].sort()]).sort() });
 
-  for (const conflict of ["bounce", "seeded"] as const) {
-    for (const order of ["attacks-first", "move-first"] as const) {
-      it(`результат не зависит от порядка входных массивов (${conflict}, ${order}), 300 случайных ходов`, () => {
-        for (let seed = 1; seed <= 300; seed++) {
-          const { s, perPlayer, r } = randomScenario(seed);
-          const base = resolveTurn(s, perPlayer, { conflict, order });
-          const s2 = { ...s, units: shuffled(s.units, r) };
-          const o2 = shuffled(perPlayer, r);
-          const other = resolveTurn(s2, o2, { conflict, order });
-          expect(canon(other), `seed ${seed}`).toBe(canon(base));
-        }
-      });
-    }
+  const TIMINGS: AttackTiming[] = ["start", "zone", "end"];
+
+  for (const timing of TIMINGS) {
+    it(`результат не зависит от порядка входных массивов (${timing}), 150 случайных ходов`, () => {
+      for (let seed = 1; seed <= 150; seed++) {
+        const { s, perPlayer, r } = randomScenario(seed);
+        const base = resolveTurn(s, perPlayer, { attackTiming: timing });
+        // тасуем юнитов и приказы между игроками; порядок приказов ВНУТРИ списка игрока сохраняем
+        const other = resolveTurn({ ...s, units: shuffled(s.units, r) }, shuffled(perPlayer, r), { attackTiming: timing });
+        expect(canon(other), `seed ${seed}`).toBe(canon(base));
+      }
+    });
   }
 
-  it("лог полон: applyEvents(начальное состояние, лог) == итоговое состояние (300 случайных ходов)", () => {
-    for (let seed = 1; seed <= 300; seed++) {
+  it("лог полон: applyEvents(начальное, лог) == итоговое состояние (150 ходов × 3 режима)", () => {
+    for (let seed = 1; seed <= 150; seed++) {
       const { s, perPlayer } = randomScenario(seed);
-      for (const order of ["attacks-first", "move-first"] as const) {
-        const res = resolveTurn(s, perPlayer, { order });
-        expect(applyEvents(s, res.events).units, `seed ${seed} ${order}`).toEqual(res.state.units);
+      for (const timing of TIMINGS) {
+        const res = resolveTurn(s, perPlayer, { attackTiming: timing });
+        expect(applyEvents(s, res.events).units, `seed ${seed} ${timing}`).toEqual(res.state.units);
       }
     }
   });
 
-  it("после каждого хода не больше одного юнита на клетку", () => {
-    for (let seed = 1; seed <= 300; seed++) {
+  it("все юниты остаются в карте, вне стен и почти не перекрываются (разреженные сценарии)", () => {
+    let worst = 0;
+    for (let seed = 1; seed <= 150; seed++) {
       const { s, perPlayer } = randomScenario(seed);
       const res = resolveTurn(s, perPlayer);
-      const seen = new Set(res.state.units.map((u) => u.y * s.w + u.x));
-      expect(seen.size, `seed ${seed}`).toBe(res.state.units.length);
-    }
-  });
-
-  it("в одном подтике у двух шагов нет общей середины: нет ни обмена местами, ни креста (300 ходов)", () => {
-    let crossesSeen = 0;
-    for (let seed = 1; seed <= 300; seed++) {
-      const { s, perPlayer } = randomScenario(seed);
-      for (const conflict of ["bounce", "seeded"] as const) {
-        const res = resolveTurn(s, perPlayer, { conflict });
-        const mids = new Map<string, number>();
-        for (const e of res.events) {
-          if (e.t === "blocked" && e.reason === "cross") crossesSeen++;
-          if (e.t !== "step" || !e.from || !e.to) continue;
-          const key = `${e.tick}:${e.from[0] + e.to[0]},${e.from[1] + e.to[1]}`;
-          expect(mids.has(key), `seed ${seed} ${conflict}: шаги ${mids.get(key)} и ${e.unit} делят середину ${key}`).toBe(false);
-          mids.set(key, e.unit);
-        }
+      worst = Math.max(worst, res.stats.maxOverlap);
+      for (const u of res.state.units) {
+        expect(u.x >= u.radius && u.y >= u.radius && u.x <= s.w - u.radius && u.y <= s.h - u.radius, `seed ${seed}`).toBe(true);
       }
     }
-    // страховка от «зелёного по пустоте»: правило креста должно реально срабатывать на этих сценариях
-    expect(crossesSeen).toBeGreaterThan(0);
+    // допуск: в плотных схватках остаётся небольшое остаточное перекрытие (четыре прохода расталкивания)
+    expect(worst).toBeLessThanOrEqual(40);
   });
 
-  it("повторный запуск даёт байт-в-байт тот же результат", () => {
+  it("лимит AP: при ap=3 принято не больше трёх платных приказов на игрока, порядок входа не важен", () => {
+    for (let seed = 1; seed <= 60; seed++) {
+      const { s, perPlayer, r } = randomScenario(seed, 3);
+      const res = resolveTurn(s, perPlayer);
+      for (const po of perPlayer) {
+        const paid = po.orders.filter((o) => o.kind !== "defend").length;
+        const rejected = res.rejected.filter((q) => q.player === po.player).length;
+        expect(paid - rejected, `seed ${seed} player ${po.player}`).toBeLessThanOrEqual(3);
+      }
+      const other = resolveTurn({ ...s, units: shuffled(s.units, r) }, shuffled(perPlayer, r));
+      expect(canon(other), `seed ${seed}`).toBe(canon(res));
+    }
+  });
+
+  it("повторный запуск даёт тот же результат бит в бит", () => {
     const { s, perPlayer } = randomScenario(42);
     expect(canon(resolveTurn(s, perPlayer))).toBe(canon(resolveTurn(s, perPlayer)));
   });
 });
-
-// чтобы импорт Ev не считался неиспользуемым при verbatimModuleSyntax
-export type _Ev = Ev;

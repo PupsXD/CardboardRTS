@@ -1,9 +1,12 @@
-import { cellIndex, dist2, inBounds, moveBudget, pathCost } from "./grid.ts";
+import { maxOverlap, separate } from "./collide.ts";
+import type { Walls } from "./collide.ts";
+import type { Body } from "./collide.ts";
+import { advance, clamp, dist2, inMap, terrainSpeed } from "./geom.ts";
+import { MAX_PATH_POINTS, Terrain, TERRAIN_CELL } from "./types.ts";
 import type {
-  BlockReason,
-  Cell,
   Ev,
   PlayerOrders,
+  Point,
   Reject,
   RejectReason,
   ResolveOptions,
@@ -14,73 +17,90 @@ import type {
   UnitId,
 } from "./types.ts";
 
-/** Целочисленный хеш: общий сид + ход + подтик + id юнита. Не зависит от порядка входных массивов. */
-export function mix(a: number, b: number, c: number, d: number): number {
-  let h = (0x9e3779b9 ^ a) | 0;
-  for (const v of [b, c, d]) {
-    h = Math.imul(h ^ v, 0x85ebca6b);
-    h ^= h >>> 13;
-    h = Math.imul(h, 0xc2b2ae35);
-    h ^= h >>> 16;
-  }
-  return h >>> 0;
-}
+/** Сколько проходов расталкивания за тик. Остаточное перекрытие после них измеряется в stats.maxOverlap. */
+const SEPARATION_PASSES = 4;
+/** Ячейка быстрого поиска целей залпа. Должна быть не меньше радиус тела + aoe. */
+const TARGET_CELL = 500;
 
 interface Mover {
   u: Unit;
-  path: Cell[];
-  i: number;
+  wps: Point[];
+  wi: number;
+  speed: number;
   stopped: boolean;
 }
 
-const byId = (a: { u: Unit }, b: { u: Unit }) => a.u.id - b.u.id;
+const bodyKey = (cx: number, cy: number): number => (cx + 1) * 8192 + (cy + 1);
 
 /**
- * Разрешение одного хода.
+ * Разрешение одного хода в непрерывном пространстве.
+ *
+ * Ход = state.ticks тиков. В каждом тике: залп (если пора по `attackTiming`) по позициям на начало тика,
+ * затем одновременное движение всех, затем расталкивание тел. Всё целочисленное.
  *
  * Свойства, которые держат тесты:
- *  - результат и лог не зависят от порядка юнитов и приказов во входных массивах (кроме порядка
- *    приказов ВНУТРИ списка одного игрока — он решает, какие приказы не влезли в AP);
- *  - один юнит на клетку после каждого подтика;
- *  - applyEvents(initial, events) == итоговое состояние.
+ *  - результат и лог не зависят от порядка юнитов и приказов во входных массивах (кроме порядка приказов
+ *    ВНУТРИ списка одного игрока — он решает, какие приказы не влезли в AP);
+ *  - applyEvents(начальное состояние, лог) == итоговое состояние;
+ *  - повторный запуск даёт тот же результат бит в бит.
  */
 export function resolveTurn(state: State, allOrders: PlayerOrders[], opts: ResolveOptions = {}): ResolveResult {
-  const conflict = opts.conflict ?? "bounce";
-  const order = opts.order ?? "attacks-first";
+  const timing = opts.attackTiming ?? "zone";
+  const T = state.ticks;
 
   const units = new Map<UnitId, Unit>();
   for (const u of state.units) units.set(u.id, { ...u });
 
   const events: Ev[] = [];
   const rejected: Reject[] = [];
-  const stats: ResolveStats = { hits: 0, overkill: 0, blocked: 0, ticks: 0 };
+  const stats: ResolveStats = { hits: 0, overkill: 0, blocked: 0, maxOverlap: 0 };
 
-  // ---- 0. Валидация и учёт AP -------------------------------------------------------------
+  const walls: Walls = {
+    cell: TERRAIN_CELL,
+    tw: state.tw,
+    th: state.th,
+    blocked: (cx, cy) => state.terrain[cy * state.tw + cx] === Terrain.Blocked,
+  };
+
+  // ---- Валидация и учёт AP ----------------------------------------------------------------
   const apLeft = new Map<number, number>(state.players.map((p) => [p.id, p.ap]));
   const used = new Set<UnitId>();
-  const moves: Mover[] = [];
-  const attacks: { u: Unit; at: Cell }[] = [];
+  const movers: Mover[] = [];
+  const shooters: { u: Unit; at: Point }[] = [];
   const defending = new Set<UnitId>();
 
   for (const po of allOrders) {
     for (const o of po.orders) {
-      const fail = (reason: RejectReason) => rejected.push({ player: po.player, unit: o.unit, reason });
-      const u = units.get(o.unit);
-      if (!u) {
-        fail("unknown-unit");
+      const fail = (reason: RejectReason) => rejected.push({ player: po.player, units: [...o.units], reason });
+      if (o.units.length === 0) {
+        fail("empty-group");
         continue;
       }
-      if (u.owner !== po.player) {
-        fail("not-owner");
+      if (o.units.length > state.maxGroup) {
+        fail("group-too-big");
         continue;
       }
-      if (used.has(u.id)) {
-        fail("duplicate");
+      const group: Unit[] = [];
+      const seen = new Set<UnitId>();
+      let bad: RejectReason | undefined;
+      for (const id of o.units) {
+        const u = units.get(id);
+        if (!u) bad = "unknown-unit";
+        else if (u.owner !== po.player) bad = "not-owner";
+        else if (used.has(id) || seen.has(id)) bad = "duplicate";
+        if (bad) break;
+        seen.add(id);
+        group.push(u!);
+      }
+      if (bad) {
+        fail(bad);
         continue;
       }
       if (o.kind === "defend") {
-        used.add(u.id);
-        defending.add(u.id); // бесплатно (предложение ГДД)
+        for (const u of group) {
+          used.add(u.id);
+          defending.add(u.id); // бесплатно (предложение ГДД)
+        }
         continue;
       }
       if ((apLeft.get(po.player) ?? 0) < 1) {
@@ -88,51 +108,79 @@ export function resolveTurn(state: State, allOrders: PlayerOrders[], opts: Resol
         continue;
       }
       if (o.kind === "move") {
-        if (o.path.length === 0 || (pathCost(state, [u.x, u.y], o.path) ?? Infinity) > moveBudget(u)) {
+        if (o.path.length === 0 || o.path.length > MAX_PATH_POINTS || o.path.some((p) => !inMap(state, p))) {
           fail("bad-path");
           continue;
         }
-        moves.push({ u, path: o.path, i: 0, stopped: false });
+        let sx = 0;
+        let sy = 0;
+        let speed = Infinity;
+        for (const u of group) {
+          sx += u.x;
+          sy += u.y;
+          speed = Math.min(speed, u.speed);
+        }
+        const cx = Math.trunc(sx / group.length);
+        const cy = Math.trunc(sy / group.length);
+        for (const u of group) {
+          const ox = u.x - cx;
+          const oy = u.y - cy;
+          const wps: Point[] = o.path.map((p) => [clamp(p[0] + ox, 0, state.w), clamp(p[1] + oy, 0, state.h)]);
+          movers.push({ u, wps, wi: 0, speed, stopped: false });
+        }
       } else {
-        const [ax, ay] = o.at;
-        if (!inBounds(state, ax, ay)) {
+        if (!inMap(state, o.at)) {
           fail("bad-target");
           continue;
         }
-        const d = dist2(u.x, u.y, ax, ay);
-        if (d < 1 || d > u.range * u.range) {
+        if (group.some((u) => dist2(u.x, u.y, o.at[0], o.at[1]) > u.range * u.range)) {
           fail("out-of-range");
           continue;
         }
-        attacks.push({ u, at: o.at });
+        for (const u of group) shooters.push({ u, at: o.at });
       }
-      used.add(u.id);
+      for (const u of group) used.add(u.id);
       apLeft.set(po.player, apLeft.get(po.player)! - 1);
     }
   }
 
-  const occupancy = (): Map<number, Unit> => {
-    const m = new Map<number, Unit>();
-    for (const u of units.values()) m.set(cellIndex(state, u.x, u.y), u);
-    return m;
-  };
-
-  // ---- Атаки: одновременно, по позициям на момент вызова -----------------------------------
-  const doAttacks = (tick: number) => {
-    const occ = occupancy();
+  // ---- Залп: все выстрелы считаются по позициям на момент вызова, урон применяется разом --------
+  const volley = (tick: number, perTick: boolean) => {
+    const live = shooters.filter((s) => units.has(s.u.id)).sort((a, b) => a.u.id - b.u.id);
+    if (live.length === 0) return;
+    const grid = new Map<number, Unit[]>();
+    for (const u of units.values()) {
+      const k = bodyKey(Math.floor(u.x / TARGET_CELL), Math.floor(u.y / TARGET_CELL));
+      const list = grid.get(k);
+      if (list) list.push(u);
+      else grid.set(k, [u]);
+    }
     const dealt = new Map<UnitId, number>();
-    attacks.sort((a, b) => a.u.id - b.u.id);
-    for (const a of attacks) {
-      if (!units.has(a.u.id)) continue; // убит до выстрела (только в move-first нельзя, в attacks-first все живы)
-      const from: Cell = [a.u.x, a.u.y];
-      const t = occ.get(cellIndex(state, a.at[0], a.at[1]));
-      if (!t) {
-        events.push({ t: "miss", tick, attacker: a.u.id, from, at: a.at, reason: "empty" });
-      } else if (t.owner === a.u.owner) {
-        events.push({ t: "miss", tick, attacker: a.u.id, from, at: a.at, reason: "friendly" });
-      } else {
-        const dmg = Math.max(1, a.u.dmg - (defending.has(t.id) ? t.defense : 0));
-        events.push({ t: "attack", tick, attacker: a.u.id, target: t.id, from, at: a.at, dmg });
+    for (const s of live) {
+      const a = s.u;
+      const from: Point = [a.x, a.y];
+      const cx = Math.floor(s.at[0] / TARGET_CELL);
+      const cy = Math.floor(s.at[1] / TARGET_CELL);
+      const targets: Unit[] = [];
+      for (let ox = -1; ox <= 1; ox++) {
+        for (let oy = -1; oy <= 1; oy++) {
+          for (const t of grid.get(bodyKey(cx + ox, cy + oy)) ?? []) {
+            if (t.owner === a.owner) continue;
+            const reach = t.radius + a.aoe;
+            if (dist2(t.x, t.y, s.at[0], s.at[1]) <= reach * reach) targets.push(t);
+          }
+        }
+      }
+      targets.sort((p, q) => p.id - q.id);
+      if (targets.length === 0) {
+        if (!perTick) events.push({ t: "miss", tick, attacker: a.id, from, at: s.at });
+        continue;
+      }
+      for (const t of targets) {
+        const base = perTick ? Math.max(1, Math.floor(a.dmg / T)) : a.dmg;
+        const cut = defending.has(t.id) ? (perTick ? Math.floor(t.defense / T) : t.defense) : 0;
+        const dmg = Math.max(1, base - cut);
+        events.push({ t: "attack", tick, attacker: a.id, target: t.id, from, at: s.at, dmg });
         dealt.set(t.id, (dealt.get(t.id) ?? 0) + dmg);
         stats.hits++;
       }
@@ -140,8 +188,7 @@ export function resolveTurn(state: State, allOrders: PlayerOrders[], opts: Resol
     // Урон применяется ПОСЛЕ расчёта всех выстрелов: убитые успевают выстрелить (взаимное убийство).
     for (const id of [...dealt.keys()].sort((a, b) => a - b)) {
       const u = units.get(id)!;
-      const sum = dealt.get(id)!;
-      u.hp -= sum;
+      u.hp -= dealt.get(id)!;
       if (u.hp <= 0) {
         stats.overkill += -u.hp;
         events.push({ t: "death", tick, unit: id, at: [u.x, u.y] });
@@ -150,125 +197,72 @@ export function resolveTurn(state: State, allOrders: PlayerOrders[], opts: Resol
     }
   };
 
-  // ---- Движение: подтики по одной клетке, симметричное разрешение конфликтов ---------------
-  const doMovement = (): number => {
-    let tick = 0;
-    for (;;) {
-      const cand = moves.filter((m) => units.has(m.u.id) && !m.stopped && m.i < m.path.length);
-      if (cand.length === 0) break;
-      tick++;
-      const occ = occupancy();
-      const moving = new Set<Mover>(cand);
-      const reasons = new Map<Mover, BlockReason>();
-      const target = (m: Mover): Cell => m.path[m.i]!;
+  // ---- Тики -------------------------------------------------------------------------------
+  for (let tick = 1; tick <= T; tick++) {
+    if (timing === "zone" || (timing === "start" && tick === 1)) volley(tick, timing === "zone");
 
-      for (;;) {
-        // Решения принимаются по снимку множества `moving` на начало прохода: порядок обхода не влияет.
-        const byUnit = new Map<UnitId, Mover>();
-        const claims = new Map<number, Mover[]>();
-        for (const m of moving) {
-          byUnit.set(m.u.id, m);
-          const [tx, ty] = target(m);
-          const ti = cellIndex(state, tx, ty);
-          const list = claims.get(ti);
-          if (list) list.push(m);
-          else claims.set(ti, [m]);
-        }
-        const inCycle = (m: Mover): boolean => {
-          let cur = m;
-          for (let k = 0; k <= moving.size; k++) {
-            const o = occ.get(cellIndex(state, target(cur)[0], target(cur)[1]));
-            if (!o) return false;
-            const om = byUnit.get(o.id);
-            if (!om) return false;
-            cur = om;
-            if (cur === m) return true;
-          }
-          return false;
-        };
-        const winnerOf = (list: Mover[]): Mover => {
-          let best = list[0]!;
-          let bh = mix(state.seed, state.turn, tick, best.u.id);
-          for (const m of list) {
-            const h = mix(state.seed, state.turn, tick, m.u.id);
-            if (h < bh || (h === bh && m.u.id < best.u.id)) {
-              best = m;
-              bh = h;
-            }
-          }
-          return best;
-        };
+    const startPos = new Map<UnitId, Point>();
+    for (const u of units.values()) startPos.set(u.id, [u.x, u.y]);
 
-        const blockedNow = new Map<Mover, BlockReason>();
-        for (const m of moving) {
-          const [tx, ty] = target(m);
-          const ti = cellIndex(state, tx, ty);
-          const o = occ.get(ti);
-          let reason: BlockReason | undefined;
-          if (o) {
-            const om = byUnit.get(o.id);
-            if (!om) reason = "occupied";
-            else if (target(om)[0] === m.u.x && target(om)[1] === m.u.y) reason = "swap";
-            else if (inCycle(m)) reason = "cycle";
-          }
-          if (!reason) {
-            // Диагональное пересечение «крестом»: два юнита идут по диагоналям одного квадрата 2×2 и
-            // проходят друг через друга в центре. Как и обмен местами, запрещено для обоих.
-            const dx = tx - m.u.x;
-            const dy = ty - m.u.y;
-            if (dx !== 0 && dy !== 0) {
-              const a = occ.get(cellIndex(state, m.u.x + dx, m.u.y));
-              const b = occ.get(cellIndex(state, m.u.x, m.u.y + dy));
-              const am = a && byUnit.get(a.id);
-              const bm = b && byUnit.get(b.id);
-              if (am && target(am)[0] === m.u.x && target(am)[1] === m.u.y + dy) reason = "cross";
-              else if (bm && target(bm)[0] === m.u.x + dx && target(bm)[1] === m.u.y) reason = "cross";
-            }
-          }
-          if (!reason) {
-            const list = claims.get(ti)!;
-            if (list.length > 1 && (conflict === "bounce" || winnerOf(list) !== m)) reason = "contested";
-          }
-          if (reason) blockedNow.set(m, reason);
-        }
-        if (blockedNow.size === 0) break;
-        for (const [m, r] of blockedNow) {
-          moving.delete(m);
-          reasons.set(m, r);
-        }
-      }
-
-      for (const m of [...reasons.keys()].sort(byId)) {
-        m.stopped = true; // путь брошен: юнит остановился рядом с препятствием
-        events.push({ t: "blocked", tick, unit: m.u.id, at: [m.u.x, m.u.y], reason: reasons.get(m)! });
+    const moved = new Set<UnitId>();
+    const stopped: Ev[] = [];
+    for (const m of movers) {
+      const u = m.u;
+      if (m.stopped || m.wi >= m.wps.length || !units.has(u.id)) continue;
+      const budget = Math.floor((m.speed * terrainSpeed(state, u.x, u.y)) / 100);
+      const [nx, ny, nwi] = advance(u.x, u.y, m.wps, m.wi, budget);
+      if (terrainSpeed(state, nx, ny) === 0) {
+        m.stopped = true;
+        stopped.push({ t: "blocked", tick, unit: u.id, at: [u.x, u.y], reason: "terrain" });
         stats.blocked++;
+        continue;
       }
-      const going = [...moving].sort(byId);
-      for (const m of going) events.push({ t: "step", tick, unit: m.u.id, from: [m.u.x, m.u.y], to: target(m) });
-      for (const m of going) {
-        const [tx, ty] = target(m);
-        m.u.x = tx;
-        m.u.y = ty;
-        m.i++;
+      m.wi = nwi;
+      if (nx !== u.x || ny !== u.y) {
+        u.x = nx;
+        u.y = ny;
+        moved.add(u.id);
       }
     }
-    return tick;
-  };
 
-  if (order === "attacks-first") {
-    doAttacks(0);
-    stats.ticks = doMovement();
-  } else {
-    stats.ticks = doMovement();
-    doAttacks(stats.ticks + 1);
+    // Порядок событий не должен зависеть от порядка приказов во входе: сортируем по id юнита.
+    stopped.sort((a, b) => (a as { unit: number }).unit - (b as { unit: number }).unit);
+    events.push(...stopped);
+
+    if (moved.size > 0) {
+      const bodies: Body[] = [];
+      for (const u of units.values()) bodies.push({ id: u.id, x: u.x, y: u.y, r: u.radius, mover: moved.has(u.id) });
+      const before = new Map<UnitId, Point>();
+      for (const b of bodies) if (b.mover) before.set(b.id, [b.x, b.y]);
+      separate(bodies, SEPARATION_PASSES, walls);
+      for (const b of bodies) {
+        if (!b.mover) continue;
+        const u = units.get(b.id)!;
+        const nx = clamp(b.x, u.radius, state.w - u.radius);
+        const ny = clamp(b.y, u.radius, state.h - u.radius);
+        if (terrainSpeed(state, nx, ny) === 0) {
+          const p = before.get(b.id)!; // вытолкнуло в стену: остаёмся на месте до расталкивания
+          u.x = p[0];
+          u.y = p[1];
+        } else {
+          u.x = nx;
+          u.y = ny;
+        }
+      }
+    }
+
+    for (const id of [...units.keys()].sort((a, b) => a - b)) {
+      const u = units.get(id)!;
+      const p = startPos.get(id)!;
+      if (u.x !== p[0] || u.y !== p[1]) events.push({ t: "step", tick, unit: id, from: p, to: [u.x, u.y] });
+    }
   }
+  if (timing === "end") volley(T + 1, false);
+
+  stats.maxOverlap = maxOverlap([...units.values()].map((u) => ({ id: u.id, x: u.x, y: u.y, r: u.radius, mover: false })));
 
   return {
-    state: {
-      ...state,
-      turn: state.turn + 1,
-      units: [...units.values()].sort((a, b) => a.id - b.id),
-    },
+    state: { ...state, turn: state.turn + 1, units: [...units.values()].sort((a, b) => a.id - b.id) },
     events,
     rejected,
     stats,
@@ -289,4 +283,38 @@ export function applyEvents(state: State, events: readonly Ev[]): State {
     }
   }
   return { ...state, turn: state.turn + 1, units: [...units.values()].sort((a, b) => a.id - b.id) };
+}
+
+/**
+ * Куда дойдёт группа по маршруту за ход, если ей никто не мешает (для превью в клиенте и тестов).
+ * Использует то же движение, что и resolveTurn, но без других юнитов и залпов.
+ */
+export function previewMove(state: State, group: readonly Unit[], path: readonly Point[]): Point[][] {
+  let sx = 0;
+  let sy = 0;
+  let speed = Infinity;
+  for (const u of group) {
+    sx += u.x;
+    sy += u.y;
+    speed = Math.min(speed, u.speed);
+  }
+  const cx = Math.trunc(sx / group.length);
+  const cy = Math.trunc(sy / group.length);
+  return group.map((u) => {
+    const wps: Point[] = path.map((p) => [clamp(p[0] + (u.x - cx), 0, state.w), clamp(p[1] + (u.y - cy), 0, state.h)]);
+    let x = u.x;
+    let y = u.y;
+    let wi = 0;
+    const trace: Point[] = [[x, y]];
+    for (let t = 0; t < state.ticks; t++) {
+      const budget = Math.floor((speed * terrainSpeed(state, x, y)) / 100);
+      const [nx, ny, nwi] = advance(x, y, wps, wi, budget);
+      if (terrainSpeed(state, nx, ny) === 0) break;
+      x = nx;
+      y = ny;
+      wi = nwi;
+      trace.push([x, y]);
+    }
+    return trace;
+  });
 }

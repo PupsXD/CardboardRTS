@@ -1,12 +1,27 @@
-// Типы чистой симуляции. Никакого IO, времени и Math.random: всё целочисленное и детерминированное.
+// Типы чистой симуляции в НЕПРЕРЫВНОМ пространстве (как в Lines of Battle: нет сетки, тела расталкиваются).
+// Никакого IO, времени и Math.random. Координаты и длины — целые числа в «пунктах»: SCALE пунктов = 1 единица длины.
+// Целые числа дают байт-в-байт одинаковый результат на любой машине и в любом порядке вычислений.
 
-/** Клетка [x, y]. Кортеж, а не объект: события короче в JSON. */
-export type Cell = readonly [x: number, y: number];
+/** Точка [x, y] в пунктах. */
+export type Point = readonly [x: number, y: number];
 export type PlayerId = number;
 export type UnitId = number;
 
-/** Рельеф. Стоимость входа в клетку — в grid.ts (STEP_COST). */
+/** 1 единица длины = SCALE пунктов. Диаметр обычного юнита — 1 единица. */
+export const SCALE = 100;
+
+/** Рельеф хранится растром ячеек TERRAIN_CELL×TERRAIN_CELL пунктов; рисуется он как угодно, это формат данных. */
+export const TERRAIN_CELL = 200;
 export const Terrain = { Plain: 0, Road: 1, Rough: 2, Blocked: 3 } as const;
+/** Скорость движения по рельефу, проценты. 0 — непроходимо. */
+export const TERRAIN_SPEED: readonly number[] = [100, 200, 60, 0];
+
+/** Не больше точек в маршруте приказа (защита от раздувания приказа). */
+export const MAX_PATH_POINTS = 16;
+/** Радиус обзора не должен превышать это (индекс видимости построен на сетке этого шага). */
+export const MAX_VISION = 1000;
+/** Радиус тела не должен превышать это (шаг сетки расталкивания = 2 × MAX_RADIUS). */
+export const MAX_RADIUS = 100;
 
 export interface Unit {
   id: UnitId;
@@ -14,39 +29,52 @@ export interface Unit {
   x: number;
   y: number;
   hp: number;
-  /** Урон за выстрел. */
+  /** Урон за залп. */
   dmg: number;
   /** Сколько урона гасит стойка «Оборона». */
   defense: number;
-  /** Запас хода в очках движения (не в клетках: цену клетки задаёт рельеф; масштаб — COST_SCALE в grid.ts). */
-  move: number;
-  /** Радиус атаки в клетках, евклидов (круг). */
+  /** Скорость по равнине, пунктов за тик. */
+  speed: number;
+  /** Радиус тела. Юниты не перекрываются: тела расталкиваются. */
+  radius: number;
+  /** Радиус атаки: расстояние от юнита до точки, куда он стреляет. */
   range: number;
-  /** Радиус обзора в клетках, евклидов (круг). */
+  /** Радиус обзора. */
   vision: number;
+  /** Радиус поражения вокруг точки выстрела (поверх радиуса тела цели). */
+  aoe: number;
 }
 
 export interface PlayerInfo {
   id: PlayerId;
-  /** Бюджет очков действий на этот ход. */
+  /** Бюджет очков действий на ход: 1 AP за любой приказ (юниту или группе), оборона бесплатна. */
   ap: number;
 }
 
 export interface State {
   turn: number;
-  seed: number;
+  /** Размеры карты в пунктах. */
   w: number;
   h: number;
+  /** Растр рельефа: tw×th ячеек по TERRAIN_CELL пунктов. */
   terrain: Uint8Array;
+  tw: number;
+  th: number;
+  /** Тиков в ходе. */
+  ticks: number;
+  /** Максимальный размер группы в одном приказе (заглушка для баланса, решение владельца). */
+  maxGroup: number;
   players: PlayerInfo[];
   units: Unit[];
 }
 
+/** Приказ группе (или одному юниту: группа из одного). Стоит 1 AP независимо от размера группы. */
 export type Order =
-  | { kind: "move"; unit: UnitId; path: Cell[] }
-  /** Цель — КЛЕТКА, а не id юнита: так игрок не может зондировать туман, подставляя чужие id. */
-  | { kind: "attack"; unit: UnitId; at: Cell }
-  | { kind: "defend"; unit: UnitId };
+  /** Группа идёт по ломаной, сохраняя взаимное расположение; скорость группы — скорость самого медленного. */
+  | { kind: "move"; units: UnitId[]; path: Point[] }
+  /** Цель — ТОЧКА, а не id юнита: так нельзя зондировать туман, подставляя чужие id. */
+  | { kind: "attack"; units: UnitId[]; at: Point }
+  | { kind: "defend"; units: UnitId[] };
 
 export interface PlayerOrders {
   player: PlayerId;
@@ -54,6 +82,8 @@ export interface PlayerOrders {
 }
 
 export type RejectReason =
+  | "empty-group"
+  | "group-too-big"
   | "unknown-unit"
   | "not-owner"
   | "duplicate"
@@ -64,36 +94,38 @@ export type RejectReason =
 
 export interface Reject {
   player: PlayerId;
-  unit: UnitId;
+  units: UnitId[];
   reason: RejectReason;
 }
 
-export type BlockReason = "occupied" | "contested" | "swap" | "cross" | "cycle";
-
-/** Лог разрешения хода. Это и есть то, что уходит клиентам (после фильтра тумана), а не состояние. */
+/** Лог исполнения хода. Это и уходит клиентам (после фильтра тумана), а не состояние. */
 export type Ev =
-  | { t: "attack"; tick: number; attacker: UnitId; target: UnitId; from: Cell | null; at: Cell; dmg: number }
-  | { t: "miss"; tick: number; attacker: UnitId; from: Cell | null; at: Cell; reason: "empty" | "friendly" }
-  | { t: "death"; tick: number; unit: UnitId; at: Cell }
-  | { t: "step"; tick: number; unit: UnitId; from: Cell | null; to: Cell | null }
-  | { t: "blocked"; tick: number; unit: UnitId; at: Cell; reason: BlockReason };
+  | { t: "step"; tick: number; unit: UnitId; from: Point | null; to: Point | null }
+  | { t: "attack"; tick: number; attacker: UnitId; target: UnitId; from: Point | null; at: Point; dmg: number }
+  | { t: "miss"; tick: number; attacker: UnitId; from: Point | null; at: Point }
+  | { t: "death"; tick: number; unit: UnitId; at: Point }
+  | { t: "blocked"; tick: number; unit: UnitId; at: Point; reason: "terrain" };
 
-export type ConflictMode = "bounce" | "seeded";
-export type ResolutionOrder = "attacks-first" | "move-first";
+/**
+ * Когда стреляют юниты с приказом атаки:
+ *  - start: один залп в начале хода по начальным позициям (уйти от него в этот ход нельзя);
+ *  - zone:  каждый тик по текущим позициям, урон хода делится на тики (цель, прошедшая зону, получает часть);
+ *  - end:   один залп после всего движения (кто ушёл — не получил).
+ */
+export type AttackTiming = "start" | "zone" | "end";
 
 export interface ResolveOptions {
-  /** Что делать, когда несколько юнитов входят в одну клетку: всех остановить или выбрать по сиду. */
-  conflict?: ConflictMode;
-  /** attacks-first — как в ГДД v0.1; move-first — атаки по позициям ПОСЛЕ движения. */
-  order?: ResolutionOrder;
+  attackTiming?: AttackTiming;
 }
 
 export interface ResolveStats {
   hits: number;
-  /** Урон сверх нужного для убийства: «зря потраченные» выстрелы при фокусе. */
+  /** Урон сверх нужного для убийства. */
   overkill: number;
+  /** Остановки о непроходимый рельеф. */
   blocked: number;
-  ticks: number;
+  /** Наибольшее перекрытие тел в конце хода, пунктов (0 — нет перекрытий). */
+  maxOverlap: number;
 }
 
 export interface ResolveResult {

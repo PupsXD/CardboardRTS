@@ -1,38 +1,51 @@
-import type { Cell, Order, PlayerOrders, State, Unit } from "../src/index.ts";
+import { SCALE, TERRAIN_CELL } from "../src/index.ts";
+import type { Order, PlayerOrders, Point, State, Unit } from "../src/index.ts";
 
+/** Юнит; x, y — в единицах длины (умножаются на SCALE), остальные поля в пунктах. */
 export function unit(id: number, owner: number, x: number, y: number, over: Partial<Unit> = {}): Unit {
-  return { id, owner, x, y, hp: 10, dmg: 4, defense: 2, move: 8, range: 3, vision: 4, ...over };
+  return {
+    id,
+    owner,
+    x: Math.round(x * SCALE),
+    y: Math.round(y * SCALE),
+    hp: 100,
+    dmg: 40,
+    defense: 20,
+    speed: 30,
+    radius: 50,
+    range: 300,
+    vision: 500,
+    aoe: 0,
+    ...over,
+  };
 }
 
+/** Мир w×h единиц длины, вся равнина, 10 тиков, группа до 6. */
 export function world(w: number, h: number, units: Unit[], over: Partial<State> = {}): State {
+  const W = w * SCALE;
+  const H = h * SCALE;
+  const tw = Math.ceil(W / TERRAIN_CELL);
+  const th = Math.ceil(H / TERRAIN_CELL);
   const owners = [...new Set(units.map((u) => u.owner))].sort((a, b) => a - b);
   return {
     turn: 1,
-    seed: 12345,
-    w,
-    h,
-    terrain: new Uint8Array(w * h), // всё равнина
+    w: W,
+    h: H,
+    terrain: new Uint8Array(tw * th),
+    tw,
+    th,
+    ticks: 10,
+    maxGroup: 6,
     players: owners.map((id) => ({ id, ap: 99 })),
     units,
     ...over,
   };
 }
 
-/** Прямой маршрут по горизонтали или вертикали, без стартовой клетки. */
-export function line(from: Cell, to: Cell): Cell[] {
-  const out: Cell[] = [];
-  let [x, y] = from;
-  while (x !== to[0] || y !== to[1]) {
-    if (x !== to[0]) x += Math.sign(to[0] - x);
-    else y += Math.sign(to[1] - y);
-    out.push([x, y]);
-  }
-  return out;
-}
-
-export const move = (unitId: number, path: Cell[]): Order => ({ kind: "move", unit: unitId, path });
-export const attack = (unitId: number, at: Cell): Order => ({ kind: "attack", unit: unitId, at });
-export const defend = (unitId: number): Order => ({ kind: "defend", unit: unitId });
+export const pt = (x: number, y: number): Point => [Math.round(x * SCALE), Math.round(y * SCALE)];
+export const move = (units: number[], ...path: Point[]): Order => ({ kind: "move", units, path });
+export const attack = (units: number[], at: Point): Order => ({ kind: "attack", units, at });
+export const defend = (units: number[]): Order => ({ kind: "defend", units });
 export const orders = (player: number, ...list: Order[]): PlayerOrders => ({ player, orders: list });
 
 /** Воспроизводимый ГПСЧ только для тестов и бенча; сама симуляция его не использует. */
@@ -55,3 +68,8 @@ export function shuffled<T>(arr: readonly T[], r: () => number): T[] {
   }
   return a;
 }
+
+export const posOf = (s: State, id: number): Point | null => {
+  const u = s.units.find((x) => x.id === id);
+  return u ? [u.x, u.y] : null;
+};
