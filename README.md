@@ -15,6 +15,7 @@
 | [Узкие места дизайна](docs/analysis/01-design-bottlenecks.md) | что в ГДД ломается и что с этим делать |
 | [Массовый мультиплеер](docs/analysis/02-mass-multiplayer.md) | что масштабируется, что нет, какие режимы |
 | [Результаты спайка](docs/analysis/03-spike-results.md) | что проверено тестами и бенчмарком, что нет |
+| [Победа, объём и онлайн-игра](docs/analysis/05-victory-scope-and-live-play.md) | типы победы, минута на ход, очерёдность стадий |
 | [Пространство, группы и бумажный стиль](docs/analysis/04-grid-and-paper-style.md) | непрерывное пространство «как в Lines of Battle», групповые приказы, бумажный стиль |
 | [ADR 0001: стек](docs/adr/0001-tech-stack.md) | TypeScript, Phaser 4, Node, SQLite и почему |
 | [ADR 0002: сервер и хранение](docs/adr/0002-server-authority-and-persistence.md) | авторитетный сервер, снимки, версии правил |
