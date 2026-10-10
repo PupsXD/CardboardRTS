@@ -6,7 +6,7 @@ export interface Body {
   x: number;
   y: number;
   r: number;
-  /** Двигалось ли тело в этот тик по своему приказу. Стоящие тела расталкивать нельзя: они «тяжёлые». */
+  /** Двигалось ли тело в этот тик по своему приказу. Стоящее смещается только по уступчивости staticYield. */
   mover: boolean;
 }
 
@@ -24,17 +24,7 @@ function buildGrid(bodies: readonly Body[]): Map<number, Body[]> {
   return g;
 }
 
-/**
- * Расталкивание перекрывшихся тел. Итерации в стиле Якоби: смещения всех пар считаются по позициям на начало
- * итерации и применяются разом, суммы целые, поэтому порядок тел во входном массиве не влияет на результат.
- *
- *  - двигавшееся против стоящего: смещается только двигавшееся (стоящий — «стена»);
- *  - двигавшееся против двигавшегося: поровну (симметрично, без приоритета);
- *  - стоящее против стоящего: ничего.
- *
- * Совпадающие центры (d = 0) разводятся по id: единственная асимметрия, и она не зависит от порядка массива.
- */
-/** Твёрдые клетки рельефа: движущееся тело выталкивается из них так же, как из других тел. */
+/** Твёрдые клетки рельефа: тело выталкивается из них так же, как из других тел. */
 export interface Walls {
   cell: number;
   tw: number;
@@ -42,74 +32,103 @@ export interface Walls {
   blocked(cx: number, cy: number): boolean;
 }
 
-export function separate(bodies: readonly Body[], iterations: number, walls?: Walls): void {
-  const movers = bodies.filter((b) => b.mover);
-  if (movers.length === 0) return;
-  const statics = bodies.filter((b) => !b.mover);
-  const sgrid = buildGrid(statics);
+/** Подвижность движущегося тела; подвижность стоящего — staticYield (0..4). */
+const MOVER_MOBILITY = 4;
+
+/**
+ * Расталкивание перекрывшихся тел. Итерации в стиле Якоби: смещения всех пар считаются по позициям на начало
+ * итерации и применяются разом, суммы целые, поэтому порядок тел во входном массиве не влияет на результат.
+ *
+ * У каждого тела есть «подвижность»: у движущегося 4, у стоящего staticYield. Смещение пары делится пропорционально
+ * подвижностям (тело с большей подвижностью уступает больше). Две движущиеся — поровну, стоящее при staticYield = 0
+ * не сдвигается вовсе («стена»).
+ *
+ * Пара обрабатывается, если хотя бы одно тело «активно»: движется или уже было сдвинуто в этом расталкивании.
+ * Так толчок передаётся по цепочке стоящих тел (иначе сдвинутый стоящий мог бы встать на другого стоящего).
+ * Сдвинутое стоящее тело дальше проверяется и на стены.
+ *
+ * Совпадающие центры (d = 0) разводятся по id: единственная асимметрия, и она не зависит от порядка массива.
+ */
+export function separate(bodies: readonly Body[], iterations: number, walls?: Walls, staticYield = 1): void {
+  if (!bodies.some((b) => b.mover)) return;
+  const n = bodies.length;
   const index = new Map<Body, number>();
-  movers.forEach((b, i) => index.set(b, i));
-  const dx = new Float64Array(movers.length);
-  const dy = new Float64Array(movers.length);
+  bodies.forEach((b, i) => index.set(b, i));
+  const dx = new Float64Array(n);
+  const dy = new Float64Array(n);
+  const touched = new Uint8Array(n); // стоящие, которые уже сдвинули: дальше они толкают соседей
+  const mobility = bodies.map((b) => (b.mover ? MOVER_MOBILITY : staticYield));
+  let grid = buildGrid(bodies);
 
   for (let it = 0; it < iterations; it++) {
     dx.fill(0);
     dy.fill(0);
-    const mgrid = buildGrid(movers);
+    if (it > 0) grid = buildGrid(bodies); // позиции изменились
     let any = false;
 
-    for (let i = 0; i < movers.length; i++) {
-      const a = movers[i]!;
+    for (let i = 0; i < n; i++) {
+      const a = bodies[i]!;
+      if (!a.mover && !touched[i]) continue;
       const cx = Math.floor(a.x / CELL);
       const cy = Math.floor(a.y / CELL);
       for (let ox = -1; ox <= 1; ox++) {
         for (let oy = -1; oy <= 1; oy++) {
-          const k = key(cx + ox, cy + oy);
-          const sl = sgrid.get(k);
-          if (sl) {
-            for (const b of sl) {
-              const p = push(a, b);
-              if (p) {
-                dx[i] += p[0];
-                dy[i] += p[1];
-                any = true;
-              }
-            }
-          }
-          const ml = mgrid.get(k);
-          if (ml) {
-            for (const b of ml) {
-              if (b.id <= a.id) continue; // каждую пару движущихся считаем один раз
-              const p = push(a, b);
-              if (p) {
-                const hx = Math.trunc(p[0] / 2);
-                const hy = Math.trunc(p[1] / 2);
-                const j = index.get(b)!;
-                dx[i] += hx;
-                dy[i] += hy;
-                dx[j] -= hx;
-                dy[j] -= hy;
-                if (hx !== 0 || hy !== 0) any = true;
-              }
-            }
+          const list = grid.get(key(cx + ox, cy + oy));
+          if (!list) continue;
+          for (const b of list) {
+            if (b === a) continue;
+            const j = index.get(b)!;
+            const bActive = b.mover || touched[j] === 1;
+            if (bActive && b.id < a.id) continue; // пару активных считаем один раз
+            const ma = mobility[i]!;
+            const mb = mobility[j]!;
+            if (ma + mb === 0) continue;
+            const p = push(a, b);
+            if (!p) continue;
+            const ax = Math.trunc((p[0] * ma) / (ma + mb));
+            const ay = Math.trunc((p[1] * ma) / (ma + mb));
+            const bx = Math.trunc((p[0] * mb) / (ma + mb));
+            const by = Math.trunc((p[1] * mb) / (ma + mb));
+            dx[i] += ax;
+            dy[i] += ay;
+            dx[j] -= bx;
+            dy[j] -= by;
+            if (ax !== 0 || ay !== 0 || bx !== 0 || by !== 0) any = true;
           }
         }
       }
     }
     if (walls) {
-      for (let i = 0; i < movers.length; i++) {
-        const p = pushFromWalls(movers[i]!, walls);
+      for (let k = 0; k < n; k++) {
+        const b = bodies[k]!;
+        if (!b.mover && !touched[k]) continue;
+        const p = pushFromWalls(b, walls);
         if (p) {
-          dx[i] += p[0];
-          dy[i] += p[1];
+          dx[k] += p[0];
+          dy[k] += p[1];
           any = true;
         }
       }
     }
     if (!any) break;
-    for (let i = 0; i < movers.length; i++) {
-      movers[i]!.x += dx[i]!;
-      movers[i]!.y += dy[i]!;
+    for (let k = 0; k < n; k++) {
+      if (dx[k] === 0 && dy[k] === 0) continue;
+      const b = bodies[k]!;
+      b.x += dx[k]!;
+      b.y += dy[k]!;
+      if (!b.mover) touched[k] = 1;
+    }
+  }
+
+  if (walls) {
+    for (let k = 0; k < n; k++) {
+      const b = bodies[k]!;
+      if (b.mover || !touched[k]) continue;
+      const p = pushFromWalls(b, walls);
+      if (p) {
+        b.x += p[0];
+        b.y += p[1];
+      }
     }
   }
 }

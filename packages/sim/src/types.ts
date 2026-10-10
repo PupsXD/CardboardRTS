@@ -116,6 +116,11 @@ export type AttackTiming = "start" | "zone" | "end";
 
 export interface ResolveOptions {
   attackTiming?: AttackTiming;
+  /**
+   * Уступчивость стоящих тел при толчке движущегося, 0..4. 0 — стоящий неподвижен («стена»); 4 — смещается наравне с
+   * движущимся; по умолчанию 1 (стоящий получает 1/5 смещения). Решение владельца 2026-10-10: стоящих можно сдвигать.
+   */
+  staticYield?: number;
 }
 
 export interface ResolveStats {

@@ -115,11 +115,34 @@ describe("тела расталкиваются, а не проходят дру
     expect(r.stats.maxOverlap).toBeLessThanOrEqual(2);
   });
 
-  it("движущийся упирается в стоящего, стоящий не сдвигается ни на пункт", () => {
+  const pushInto = (staticYield?: number) => {
     const s = world(40, 40, [unit(1, 0, 10, 10), unit(2, 1, 12, 10)]);
-    const r = resolveTurn(s, [orders(0, move([1], pt(16, 10))), orders(1, defend([2]))]);
+    return resolveTurn(s, [orders(0, move([1], pt(16, 10))), orders(1, defend([2]))], { staticYield });
+  };
+
+  it("staticYield=0: стоящий — стена, не сдвигается ни на пункт, движущийся упирается вплотную", () => {
+    const r = pushInto(0);
     expect(posOf(r.state, 2)).toEqual(pt(12, 10));
     expect(posOf(r.state, 1)![0]).toBeLessThanOrEqual(1100 + 2);
+  });
+
+  it("по умолчанию стоящего можно сдвинуть: он уступает часть, движущийся проходит дальше, тела не перекрываются", () => {
+    const wall = pushInto(0);
+    const soft = pushInto();
+    const shifted = posOf(soft.state, 2)![0];
+    expect(shifted).toBeGreaterThan(1200); // сдвинут по ходу толчка
+    expect(shifted).toBeLessThan(1300);
+    expect(posOf(soft.state, 1)![0]).toBeGreaterThan(posOf(wall.state, 1)![0]); // движущийся продвинулся дальше
+    expect(posOf(soft.state, 2)![1]).toBe(1000);
+    expect(soft.stats.maxOverlap).toBeLessThanOrEqual(10);
+  });
+
+  it("staticYield=4: стоящий и движущийся делят толчок поровну", () => {
+    const r = pushInto(4);
+    const a = posOf(r.state, 1)!;
+    const b = posOf(r.state, 2)!;
+    expect(b[0] - a[0]).toBeGreaterThanOrEqual(98); // вплотную
+    expect(b[0]).toBeGreaterThan(posOf(pushInto(1).state, 2)![0]); // сдвинут сильнее, чем при уступчивости 1
   });
 
   it("со смещением в полрадиуса тела скользят друг мимо друга и не остаются внутри друг друга", () => {

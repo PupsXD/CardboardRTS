@@ -173,7 +173,7 @@ for (const players of SIZES) {
   for (let t = 0; t < TURNS; t++) {
     const orders = botOrders(s);
     const t0 = performance.now();
-    const res = resolveTurn(s, orders);
+    const res = resolveTurn(s, orders, process.env.STATIC_YIELD ? { staticYield: Number(process.env.STATIC_YIELD) } : {});
     const t1 = performance.now();
     hits += res.stats.hits;
     overlap = Math.max(overlap, res.stats.maxOverlap);

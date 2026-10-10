@@ -18,7 +18,7 @@ import type {
 } from "./types.ts";
 
 /** Сколько проходов расталкивания за тик. Остаточное перекрытие после них измеряется в stats.maxOverlap. */
-const SEPARATION_PASSES = 4;
+const SEPARATION_PASSES = 8;
 /** Ячейка быстрого поиска целей залпа. Должна быть не меньше радиус тела + aoe. */
 const TARGET_CELL = 500;
 
@@ -46,6 +46,7 @@ const bodyKey = (cx: number, cy: number): number => (cx + 1) * 8192 + (cy + 1);
  */
 export function resolveTurn(state: State, allOrders: PlayerOrders[], opts: ResolveOptions = {}): ResolveResult {
   const timing = opts.attackTiming ?? "zone";
+  const staticYield = opts.staticYield ?? 1;
   const T = state.ticks;
 
   const units = new Map<UnitId, Unit>();
@@ -232,23 +233,21 @@ export function resolveTurn(state: State, allOrders: PlayerOrders[], opts: Resol
     if (moved.size > 0) {
       const bodies: Body[] = [];
       for (const u of units.values()) bodies.push({ id: u.id, x: u.x, y: u.y, r: u.radius, mover: moved.has(u.id) });
-      const before = new Map<UnitId, Point>();
-      for (const b of bodies) if (b.mover) before.set(b.id, [b.x, b.y]);
-      separate(bodies, SEPARATION_PASSES, walls);
-      for (const b of bodies) {
-        if (!b.mover) continue;
+      const before = bodies.map((b) => [b.x, b.y] as const);
+      separate(bodies, SEPARATION_PASSES, walls, staticYield);
+      bodies.forEach((b, k) => {
+        if (!b.mover && b.x === before[k]![0] && b.y === before[k]![1]) return;
         const u = units.get(b.id)!;
         const nx = clamp(b.x, u.radius, state.w - u.radius);
         const ny = clamp(b.y, u.radius, state.h - u.radius);
         if (terrainSpeed(state, nx, ny) === 0) {
-          const p = before.get(b.id)!; // вытолкнуло в стену: остаёмся на месте до расталкивания
-          u.x = p[0];
-          u.y = p[1];
+          u.x = before[k]![0]; // аварийный случай: центр вытолкнуло в стену — остаёмся на месте до расталкивания
+          u.y = before[k]![1];
         } else {
           u.x = nx;
           u.y = ny;
         }
-      }
+      });
     }
 
     for (const id of [...units.keys()].sort((a, b) => a - b)) {
