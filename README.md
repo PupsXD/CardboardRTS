@@ -17,6 +17,7 @@
 | [Результаты спайка](docs/analysis/03-spike-results.md) | что проверено тестами и бенчмарком, что нет |
 | [Победа, объём и онлайн-игра](docs/analysis/05-victory-scope-and-live-play.md) | типы победы, минута на ход, очерёдность стадий |
 | [Пространство, группы и бумажный стиль](docs/analysis/04-grid-and-paper-style.md) | непрерывное пространство «как в Lines of Battle», групповые приказы, бумажный стиль |
+| [Прототип рендера](docs/analysis/06-render-prototype.md) | тетрадный лист на Phaser 4: что построено, замеры, находки |
 | [ADR 0001: стек](docs/adr/0001-tech-stack.md) | TypeScript, Phaser 4, Node, SQLite и почему |
 | [ADR 0002: сервер и хранение](docs/adr/0002-server-authority-and-persistence.md) | авторитетный сервер, снимки, версии правил |
 | [Вопросы владельцу](docs/OWNER-QUESTIONS.md) | решения, которые за вами |
@@ -28,7 +29,8 @@
 
 ```bash
 npm install
-npm test          # 36 тестов ядра
+npm test          # 36 тестов ядра + 4 теста клиента
+npm run dev        # прототип рендера, http://127.0.0.1:5173
 npm run typecheck # tsc --noEmit
 npm run bench     # замер 4 / 16 / 32 / 64 игроков
 ```
@@ -41,6 +43,7 @@ packages/sim/    чистое ядро правил: разрешение ход
   src/           types, geom, collide, resolve, fog
   test/          Vitest
   bench/         замер производительности
+packages/client/ прототип на Phaser 4: тетрадный лист, рисование приказов, туман, проигрывание хода
 ```
 
 Ядро (`@cardboard/sim`) намеренно не знает ни о рендере, ни о сети: его будут использовать и сервер, и клиент (превью

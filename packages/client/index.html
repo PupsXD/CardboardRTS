@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Прототип: тетрадный лист</title>
+    <style>
+      :root {
+        --paper: #f6f1e4;
+        --ink: #23272f;
+        --muted: #6b6f78;
+        --line: #c8d3e6;
+        --panel: rgba(250, 246, 235, 0.94);
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: var(--paper);
+        color: var(--ink);
+        font: 13px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif;
+        overflow: hidden;
+      }
+      #game {
+        position: fixed;
+        inset: 0;
+      }
+      #hud {
+        position: fixed;
+        top: 8px;
+        left: 8px;
+        right: 8px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 10px;
+        align-items: center;
+        padding: 6px 10px;
+        background: var(--panel);
+        border: 1px solid #b9b3a0;
+        border-radius: 6px;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+        pointer-events: auto;
+        z-index: 5;
+      }
+      #hud label {
+        display: inline-flex;
+        gap: 4px;
+        align-items: center;
+        color: var(--muted);
+      }
+      #hud input[type="number"] {
+        width: 52px;
+      }
+      #hud button,
+      #hud select,
+      #hud input {
+        font: inherit;
+      }
+      #hud button {
+        padding: 3px 9px;
+        border: 1px solid #8d887a;
+        background: #fffdf5;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      #hud button:hover {
+        background: #fff;
+      }
+      #hud button.primary {
+        background: #23272f;
+        color: #fff;
+        border-color: #23272f;
+      }
+      #hud button.player {
+        min-width: 30px;
+        color: #fff;
+        border: 2px solid transparent;
+      }
+      #hud button.player.active {
+        border-color: #23272f;
+        outline: 2px solid #fffdf5;
+      }
+      #stats {
+        margin-left: auto;
+        font-variant-numeric: tabular-nums;
+        color: var(--muted);
+      }
+      #help {
+        position: fixed;
+        left: 8px;
+        bottom: 8px;
+        max-width: 460px;
+        padding: 8px 10px;
+        background: var(--panel);
+        border: 1px solid #b9b3a0;
+        border-radius: 6px;
+        color: var(--muted);
+        z-index: 5;
+      }
+      #help b {
+        color: var(--ink);
+      }
+      #toast {
+        position: fixed;
+        left: 50%;
+        bottom: 24px;
+        transform: translateX(-50%);
+        padding: 6px 12px;
+        background: #23272f;
+        color: #fff;
+        border-radius: 6px;
+        opacity: 0;
+        transition: opacity 0.2s;
+        pointer-events: none;
+        z-index: 6;
+      }
+      #toast.show {
+        opacity: 1;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="game"></div>
+    <div id="hud"></div>
+    <div id="help"></div>
+    <div id="toast"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

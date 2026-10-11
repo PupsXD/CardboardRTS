@@ -2,11 +2,16 @@
   "name": "cardboardrts",
   "private": true,
   "type": "module",
-  "workspaces": ["packages/*"],
-  "engines": { "node": ">=24" },
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
-    "test": "npm run test -w @cardboard/sim",
-    "typecheck": "npm run typecheck -w @cardboard/sim",
+    "dev": "npm run dev -w @cardboard/client",
+    "test": "npm run test -w @cardboard/sim && npm run test -w @cardboard/client",
+    "typecheck": "npm run typecheck -w @cardboard/sim && npm run typecheck -w @cardboard/client",
     "bench": "npm run bench -w @cardboard/sim"
   }
 }
