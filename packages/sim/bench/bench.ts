@@ -4,7 +4,7 @@
 //
 // Запуск: npm run bench   (Node >= 24, TypeScript исполняется без сборки)
 import os from "node:os";
-import { filterEventsFor, resolveTurn, SCALE, Terrain, TERRAIN_CELL } from "../src/index.ts";
+import { filterEventsForAll, resolveTurn, SCALE, Terrain, TERRAIN_CELL } from "../src/index.ts";
 import type { Order, PlayerOrders, Point, State, Unit } from "../src/index.ts";
 
 function rng(seed: number): () => number {
@@ -179,8 +179,9 @@ for (const players of SIZES) {
     overlap = Math.max(overlap, res.stats.maxOverlap);
     let total = 0;
     let max = 0;
+    const logs = filterEventsForAll(s, res.events, Array.from({ length: players }, (_, p) => p));
     for (let p = 0; p < players; p++) {
-      const bytes = Buffer.byteLength(JSON.stringify(filterEventsFor(s, res.events, p)));
+      const bytes = Buffer.byteLength(JSON.stringify(logs.get(p)));
       total += bytes;
       if (bytes > max) max = bytes;
     }

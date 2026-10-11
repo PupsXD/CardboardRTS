@@ -28,7 +28,7 @@
 
 ```bash
 npm install
-npm test          # 34 теста ядра
+npm test          # 36 тестов ядра
 npm run typecheck # tsc --noEmit
 npm run bench     # замер 4 / 16 / 32 / 64 игроков
 ```

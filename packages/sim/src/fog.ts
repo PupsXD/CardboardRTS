@@ -112,3 +112,135 @@ export function filterEventsFor(initial: State, events: readonly Ev[], player: P
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// Все игроки за один проход. Результат совпадает с filterEventsFor для каждого игрока (проверено дифференциальным
+// тестом), но «кто видит точку» считается один раз на событие по общему индексу всех юнитов, а не заново на игрока.
+// ---------------------------------------------------------------------------------------------------------
+
+const GCELL = 500;
+type GlobalIndex = Map<number, Unit[]>;
+
+function buildGlobal(units: Iterable<Unit>): GlobalIndex {
+  const idx: GlobalIndex = new Map();
+  for (const u of units) {
+    const k = key(Math.floor(u.x / GCELL), Math.floor(u.y / GCELL));
+    const list = idx.get(k);
+    if (list) list.push(u);
+    else idx.set(k, [u]);
+  }
+  return idx;
+}
+
+/** Добавляет в `into` владельцев, чьи юниты в этом индексе видят точку. */
+function seers(idx: GlobalIndex, p: Point, into: Set<PlayerId>): void {
+  const R = Math.ceil(MAX_VISION / GCELL);
+  const cx = Math.floor(p[0] / GCELL);
+  const cy = Math.floor(p[1] / GCELL);
+  for (let ox = -R; ox <= R; ox++) {
+    for (let oy = -R; oy <= R; oy++) {
+      for (const u of idx.get(key(cx + ox, cy + oy)) ?? []) {
+        if (into.has(u.owner)) continue;
+        if (dist2(u.x, u.y, p[0], p[1]) <= u.vision * u.vision) into.add(u.owner);
+      }
+    }
+  }
+}
+
+export function filterEventsForAll(
+  initial: State,
+  events: readonly Ev[],
+  players: readonly PlayerId[],
+): Map<PlayerId, Ev[]> {
+  const wanted = new Set(players);
+  const out = new Map<PlayerId, Ev[]>();
+  for (const p of players) out.set(p, []);
+  const pos = new Map<UnitId, Unit>();
+  for (const u of initial.units) pos.set(u.id, { ...u });
+  const ownerOf = (id: UnitId): PlayerId | undefined => pos.get(id)?.owner;
+
+  const emit = (p: PlayerId, e: Ev) => out.get(p)!.push(e);
+
+  let i = 0;
+  while (i < events.length) {
+    const tick = events[i]!.tick;
+    let j = i;
+    while (j < events.length && events[j]!.tick === tick) j++;
+    const group = events.slice(i, j);
+    i = j;
+
+    const gA = buildGlobal(pos.values());
+    for (const e of group) {
+      if (e.t === "step" && e.to) {
+        const u = pos.get(e.unit)!;
+        u.x = e.to[0];
+        u.y = e.to[1];
+      }
+    }
+    const gB = buildGlobal(pos.values());
+    const seenBy = (pt: Point | null): Set<PlayerId> => {
+      const s = new Set<PlayerId>();
+      if (pt) {
+        seers(gA, pt, s);
+        seers(gB, pt, s);
+      }
+      return s;
+    };
+
+    for (const e of group) {
+      switch (e.t) {
+        case "step": {
+          const own = ownerOf(e.unit);
+          const sf = seenBy(e.from);
+          const st = seenBy(e.to);
+          const all = new Set<PlayerId>([...sf, ...st]);
+          if (own !== undefined) all.add(own);
+          for (const p of all) {
+            if (!wanted.has(p)) continue;
+            if (p === own) emit(p, e);
+            else emit(p, { ...e, from: sf.has(p) ? e.from : null, to: st.has(p) ? e.to : null });
+          }
+          break;
+        }
+        case "attack": {
+          const a = ownerOf(e.attacker);
+          const t = ownerOf(e.target);
+          const sf = seenBy(e.from);
+          const sa = seenBy(e.at);
+          const all = new Set<PlayerId>([...sf, ...sa]);
+          if (a !== undefined) all.add(a);
+          if (t !== undefined) all.add(t);
+          for (const p of all) {
+            if (!wanted.has(p)) continue;
+            if (p === a || p === t) emit(p, e);
+            else emit(p, { ...e, from: sf.has(p) ? e.from : null });
+          }
+          break;
+        }
+        case "miss": {
+          const a = ownerOf(e.attacker);
+          const sf = seenBy(e.from);
+          const sa = seenBy(e.at);
+          const all = new Set<PlayerId>([...sf, ...sa]);
+          if (a !== undefined) all.add(a);
+          for (const p of all) {
+            if (!wanted.has(p)) continue;
+            if (p === a) emit(p, e);
+            else emit(p, { ...e, from: sf.has(p) ? e.from : null });
+          }
+          break;
+        }
+        case "death":
+        case "blocked": {
+          const own = ownerOf(e.unit);
+          const sv = seenBy(e.at);
+          if (own !== undefined) sv.add(own);
+          for (const p of sv) if (wanted.has(p)) emit(p, e);
+          break;
+        }
+      }
+    }
+    for (const e of group) if (e.t === "death") pos.delete(e.unit);
+  }
+  return out;
+}
